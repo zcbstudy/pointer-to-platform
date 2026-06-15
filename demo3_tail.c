@@ -54,7 +54,12 @@ int main()
 			{
 				prev->next = p->next;
 			}
+			if (p == tail)
+			{
+				tail = prev;
+			}
 			free(p);
+			p = NULL;
 			break;
 		}
 		prev = p;
@@ -67,5 +72,14 @@ int main()
 			printf("%d\n", p->data);
 			p = p->next;
 		}
+		p = head;
+		while (p != NULL)
+		{
+			struct Node* temp = p;
+			p = p->next;
+			free(temp);
+		}
+		head = NULL;
+		tail = NULL;
 	return 0;
 }
