@@ -1,0 +1,94 @@
+RoadToEmbedded - demo14_gcc_makefile 学习记录
+现在开始进入linux学习
+
+一、Demo14 目标
+1. 理解 C 多文件工程的基本构建流程。
+2. 学会把 .c 文件分别编译成 .o 目标文件。
+3. 学会把多个 .o 文件链接成 Linux 可执行文件。
+4. 编写并使用基础 Makefile。
+5. 理解 make 会根据文件依赖和修改时间决定是否重新构建。
+
+二、目录结构
+demo14_gcc_makefile/
+├── main.c
+├── stack.c
+├── stack.h
+├── Makefile
+└── README.txt
+
+注意：
+main.o、stack.o、stack_demo 都是编译生成物，通常不提交到 GitHub。
+
+三、手工构建过程
+
+1. 编译 main.c：
+gcc -Wall -Wextra -std=c11 -c main.c -o main.o
+
+2. 编译 stack.c：
+gcc -Wall -Wextra -std=c11 -c stack.c -o stack.o
+
+3. 链接目标文件：
+gcc main.o stack.o -o stack_demo
+
+4. 运行程序：
+./stack_demo
+
+预期输出：
+pop value: 10
+
+四、Makefile 内容
+
+stack_demo: main.o stack.o
+	gcc main.o stack.o -o stack_demo
+
+stack.o: stack.c stack.h
+	gcc -Wall -Wextra -std=c11 -c stack.c -o stack.o
+
+main.o: main.c stack.h
+	gcc -Wall -Wextra -std=c11 -c main.c -o main.o
+
+说明：
+Makefile 中 gcc 命令前必须是真正的 Tab，不能使用普通空格。
+
+Makefile完成后在命令行
+rm -f main.o stack.o stack_demo
+make
+./demo
+
+五、核心理解
+1. .h 文件不单独编译，由 .c 文件通过 #include 引入。
+2. gcc 的 -c 参数表示只编译，不进行链接。
+3. .o 是可重定位目标文件，不能直接运行。
+4. 多个 .o 文件经过链接后，生成可执行文件。
+5. file stack.o 可以查看目标文件类型。
+6. file stack_demo 可以查看可执行文件类型。
+7. make 默认构建 Makefile 中的第一个目标。
+8. Linux 文件名区分大小写，MakeFile 和 Makefile 不是同一个文件。
+9. make 会比较目标文件和依赖文件的修改时间，避免无意义的重复编译。
+
+六、提交 GitHub 前清理生成物
+
+在 pointer-to-platform 仓库根目录执行：
+
+rm -f demo14_gcc_makefile/*.o demo14_gcc_makefile/stack_demo
+
+七、Git 提交命令
+
+cd ~/桌面/pointer-to-platform
+
+git status
+
+git add demo14_gcc_makefile
+
+git commit -m "demo14: learn GCC separate compilation and basic Makefile"
+
+git push
+
+八、本次完成结果
+已成功完成：
+- main.c 和 stack.c 的独立编译
+- main.o 和 stack.o 的链接
+- stack_demo 的运行
+- Makefile 自动构建
+- make 增量构建验证
+
