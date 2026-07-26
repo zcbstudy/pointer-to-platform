@@ -1,0 +1,448 @@
+RoadToEmbedded
+Demo15 / Demo16 代码、运行输出与学习笔记
+
+==================================================
+一、demo15_file_write
+==================================================
+
+【目标】
+使用 Linux/POSIX 文件接口完成：
+open() -> write() -> close()
+
+【main.c】
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+
+int main(void)
+{
+    int fd;
+    int cl;
+    ssize_t wr;
+
+    fd = open("a.txt", O_WRONLY | O_APPEND);
+
+    if (fd < 0)
+    {
+        printf("open error\n");
+        return 1;
+    }
+
+    wr = write(fd, "hello", 5);
+
+    if (wr != 5)
+    {
+        close(fd);
+        printf("write error\n");
+        return 1;
+    }
+
+    cl = close(fd);
+
+    if (cl < 0)
+    {
+        printf("close error\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+【编译命令】
+
+gcc -Wall -Wextra -std=c11 main.c -o file_write
+
+【运行命令】
+
+./file_write
+echo $?
+cat a.txt
+
+【示例输出】
+
+0
+
+假设 a.txt 原内容为：
+
+qwer
+
+运行后：
+
+qwerhello
+
+【笔记】
+
+1. open()
+
+函数声明：
+
+int open(const char *pathname, int flags, ...);
+
+当前使用：
+
+open("a.txt", O_WRONLY | O_APPEND);
+
+含义：
+
+O_WRONLY
+只写方式打开文件。
+
+O_APPEND
+每次 write() 都从文件末尾追加写入。
+
+注意：
+
+O_APPEND 不负责创建文件。
+如果 a.txt 不存在，并且没有使用 O_CREAT，open() 会失败并返回 -1。
+
+open() 返回值：
+
+fd >= 0
+打开成功，fd 是文件描述符。
+
+fd == -1
+打开失败。
+
+
+2. write()
+
+函数声明：
+
+ssize_t write(int fd, const void *buf, size_t count);
+
+当前调用：
+
+write(fd, "hello", 5);
+
+含义：
+
+fd
+向哪个已打开文件写入。
+
+"hello"
+待写入数据所在的内存地址。
+
+5
+最多请求写入 5 字节。
+
+write() 返回值：
+
+5
+完整写入 5 字节。
+
+0 到 4
+只写入了一部分。
+
+-1
+写入失败。
+
+因此当前程序判断：
+
+if (wr != 5)
+
+而不是只判断 wr < 0。
+
+
+3. close()
+
+函数声明：
+
+int close(int fd);
+
+返回值：
+
+0
+关闭成功。
+
+-1
+关闭失败。
+
+
+4. return 与 printf 的区别
+
+printf("open error\n");
+给人看错误提示。
+
+return 1;
+向 Shell 或调用者报告程序失败。
+
+return 0;
+表示程序正常结束。
+
+
+5. 查看程序退出状态
+
+./file_write
+echo $?
+
+$? 表示上一条命令的退出状态。
+
+0
+成功。
+
+非 0
+失败。
+
+
+==================================================
+二、demo16_file_read
+==================================================
+
+【目标】
+使用 Linux/POSIX 文件接口完成：
+open() -> read() -> 输出数据 -> close()
+
+【main.c】
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+
+int main(void)
+{
+    int fd;
+    int cl;
+    int i;
+    char buf[8];
+    ssize_t re;
+
+    fd = open("a.txt", O_RDONLY);
+
+    if (fd < 0)
+    {
+        printf("error from fd\n");
+        return 1;
+    }
+
+    while ((re = read(fd, buf, sizeof(buf))) > 0)
+    {
+        for (i = 0; i < re; i++)
+        {
+            printf("%c", buf[i]);
+        }
+    }
+
+    if (re == 0)
+    {
+        printf("\nOK\n");
+    }
+    else
+    {
+        printf("\nread bug\n");
+        close(fd);
+        return 1;
+    }
+
+    cl = close(fd);
+
+    if (cl < 0)
+    {
+        printf("bug from close\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+【编译命令】
+
+gcc -Wall -Wextra -std=c11 main.c -o file_read
+
+【运行命令】
+
+./file_read
+echo $?
+
+【示例文件内容】
+
+a.txt：
+
+qwerqwerqwerqwerqwerooo
+
+【示例输出】
+
+qwerqwerqwerqwerqwerooo
+OK
+0
+
+最后的 0 来自：
+
+echo $?
+
+表示 file_read 正常结束。
+
+
+【笔记】
+
+1. read()
+
+函数声明：
+
+ssize_t read(int fd, void *buf, size_t count);
+
+当前调用：
+
+read(fd, buf, sizeof(buf));
+
+含义：
+
+fd
+从哪个已打开文件读取。
+
+buf
+接收读取结果的缓冲区。
+
+sizeof(buf)
+本次最多读取多少字节。
+
+当前：
+
+char buf[8];
+
+所以：
+
+sizeof(buf) == 8
+
+
+2. buf 是自定义变量
+
+buf 不是 C 关键字。
+
+下面这些名字都可以：
+
+char buf[8];
+char data[8];
+char buffer[8];
+
+只要传入 read() 的变量是一块可写、容量足够的内存即可。
+
+
+3. count 与返回值 re
+
+sizeof(buf)
+表示本次最多想读取多少字节。
+
+re
+表示本次实际读取了多少字节。
+
+read() 返回值：
+
+re > 0
+本次读到了 re 个字节。
+
+re == 0
+正常到达文件末尾，即 EOF。
+
+re < 0
+读取失败。
+
+
+4. 为什么只输出 buf[0] 到 buf[re - 1]
+
+虽然 buf 总容量是 8 字节，但最后一次 read() 可能只读到 1 到 7 字节。
+
+因此不能每次固定输出 8 个位置。
+
+正确做法：
+
+for (i = 0; i < re; i++)
+{
+    printf("%c", buf[i]);
+}
+
+只输出本次实际读取到的 re 个字节。
+
+
+5. while 条件中的括号
+
+正确：
+
+while ((re = read(fd, buf, sizeof(buf))) > 0)
+
+执行顺序：
+
+先执行：
+
+re = read(...)
+
+再判断：
+
+re > 0
+
+错误写法：
+
+while (re = read(fd, buf, sizeof(buf)) > 0)
+
+因为 > 的优先级高于 =，re 可能只得到 0 或 1，而不是 read() 的真实返回值。
+
+
+6. 文件偏移量
+
+文件刚打开时，普通文件偏移量通常从 0 开始。
+
+每次 read() 成功后，偏移量会自动向后移动。
+
+循环读取过程：
+
+第一次 read
+读取前 8 字节。
+
+第二次 read
+从第 9 字节继续读取。
+
+直到 read() 返回 0
+表示已经到达文件末尾。
+
+当前 Demo 不使用 lseek()，只观察 read() 自动推进偏移量。
+
+
+7. O_RDONLY、O_WRONLY、O_RDWR
+
+O_RDONLY
+只读，可以使用 read()。
+
+O_WRONLY
+只写，可以使用 write()。
+
+O_RDWR
+可读可写。
+
+demo16 只需要读取，因此使用：
+
+O_RDONLY
+
+遵循最小必要权限原则。
+
+
+==================================================
+三、Demo15 与 Demo16 对比
+==================================================
+
+demo15：
+
+open("a.txt", O_WRONLY | O_APPEND)
+write(fd, ...)
+close(fd)
+
+作用：
+向已有文件末尾追加数据。
+
+
+demo16：
+
+open("a.txt", O_RDONLY)
+read(fd, ...)
+close(fd)
+
+作用：
+从文件开头开始读取，直到 EOF。
+
+
+共同点：
+
+1. open() 成功后才可以使用 fd。
+2. 系统调用返回值必须检查。
+3. open() 成功后，程序结束前应 close(fd)。
+4. return 只报告程序退出状态，不会自动打印错误。
+5. printf() 用于显示信息，echo $? 用于查看上一条命令的退出状态。
