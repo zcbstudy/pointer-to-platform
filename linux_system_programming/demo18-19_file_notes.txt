@@ -1,0 +1,485 @@
+RoadToEmbedded
+demo18_file_descriptor + demo19_errno_perror 学习笔记
+
+==================================================
+一、demo18：文件描述符 fd
+==================================================
+
+【核心结论】
+
+fd 不是文件本身。
+fd 是当前进程文件描述符表中的一个整数索引。
+
+程序通过这个编号访问已经打开的资源。
+
+程序启动后，通常已经占用：
+
+0：标准输入
+1：标准输出
+2：标准错误
+
+对应宏：
+
+STDIN_FILENO
+STDOUT_FILENO
+STDERR_FILENO
+
+需要头文件：
+
+#include <unistd.h>
+
+
+==================================================
+二、open() 如何分配 fd
+==================================================
+
+Linux 通常返回：
+
+当前进程中最小的、尚未使用的非负整数文件描述符。
+
+因为 0、1、2 通常已经被占用，所以第一次成功 open()
+普通文件时，经常得到：
+
+fd == 3
+
+第二次 open() 经常得到：
+
+fd == 4
+
+
+同一个文件打开两次：
+
+fd1 = open("a.txt", O_RDONLY);
+fd2 = open("a.txt", O_RDONLY);
+
+通常会得到两个不同 fd。
+
+这说明：
+
+fd 不是文件的永久编号，
+而是当前进程本次打开资源时分配的临时编号。
+
+
+==================================================
+三、fd 的释放与复用
+==================================================
+
+假设：
+
+fd1 = 3
+fd2 = 4
+
+执行：
+
+close(fd1);
+
+文件描述符 3 被释放。
+
+之后：
+
+fd3 = open("b.txt", O_RDONLY);
+
+Linux 通常会优先复用最小空闲编号，因此：
+
+fd3 = 3
+
+
+可理解为：
+
+0：占用
+1：占用
+2：占用
+3：空闲
+4：占用
+
+下一次 open() 优先使用 3。
+
+
+==================================================
+四、demo18 最小实验
+==================================================
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+
+int main(void)
+{
+    int fd1;
+    int fd2;
+    int fd3;
+
+    fd1 = open("a.txt", O_RDONLY);
+    if (fd1 < 0)
+    {
+        printf("open a.txt first error\n");
+        return 1;
+    }
+
+    fd2 = open("a.txt", O_RDONLY);
+    if (fd2 < 0)
+    {
+        printf("open a.txt second error\n");
+        close(fd1);
+        return 1;
+    }
+
+    printf("fd1 = %d\n", fd1);
+    printf("fd2 = %d\n", fd2);
+
+    if (close(fd1) < 0)
+    {
+        printf("close fd1 error\n");
+        close(fd2);
+        return 1;
+    }
+
+    fd3 = open("b.txt", O_RDONLY);
+    if (fd3 < 0)
+    {
+        printf("open b.txt error\n");
+        close(fd2);
+        return 1;
+    }
+
+    printf("fd3 = %d\n", fd3);
+
+    if (close(fd2) < 0)
+    {
+        printf("close fd2 error\n");
+        close(fd3);
+        return 1;
+    }
+
+    if (close(fd3) < 0)
+    {
+        printf("close fd3 error\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+
+准备文件：
+
+touch a.txt b.txt
+
+编译：
+
+gcc -Wall -Wextra -std=c11 main.c -o fd_demo
+
+运行：
+
+./fd_demo
+
+常见输出：
+
+fd1 = 3
+fd2 = 4
+fd3 = 3
+
+
+==================================================
+五、fd 不只表示普通文件
+==================================================
+
+文件描述符还可以对应：
+
+普通文件
+终端
+管道
+套接字
+设备文件
+
+例如：
+
+write(STDOUT_FILENO, "hello\n", 6);
+
+表示向标准输出写入。
+
+write(STDERR_FILENO, "error\n", 6);
+
+表示向标准错误写入。
+
+
+==================================================
+六、demo18 当前总结
+==================================================
+
+1. fd 是当前进程中的整数索引。
+2. fd 不是文件本身。
+3. fd 不是文件永久编号。
+4. 0、1、2 通常由标准输入、输出、错误占用。
+5. 第一次成功 open() 常见得到 3。
+6. close(fd) 后，该编号可以被复用。
+7. Linux 通常优先分配最小空闲 fd。
+8. 同一个文件打开两次，可以得到两个不同 fd。
+
+
+==================================================
+七、demo19：errno 与 perror
+==================================================
+
+以前的错误提示：
+
+printf("open error\n");
+
+只能告诉你：
+
+open() 失败了。
+
+但不能说明：
+
+为什么失败。
+
+
+系统调用失败时，通常会设置：
+
+errno
+
+需要头文件：
+
+#include <errno.h>
+
+
+errno 可能表示：
+
+文件不存在
+权限不足
+路径中的目录不存在
+文件描述符无效
+进程打开文件过多
+其他系统错误
+
+
+==================================================
+八、perror()
+==================================================
+
+函数声明：
+
+void perror(const char *s);
+
+需要头文件：
+
+#include <stdio.h>
+
+
+示例：
+
+fd = open("no_file.txt", O_RDONLY);
+
+if (fd < 0)
+{
+    perror("open");
+    return 1;
+}
+
+
+如果文件不存在，可能输出：
+
+open: No such file or directory
+
+
+其中：
+
+open
+是程序员传入的提示文字。
+
+No such file or directory
+是 perror() 根据当前 errno 输出的具体错误原因。
+
+
+==================================================
+九、printf 与 perror 的区别
+==================================================
+
+printf("open error\n");
+
+只能输出固定内容：
+
+open error
+
+
+perror("open");
+
+会输出：
+
+程序员提供的提示
++
+系统保存的具体错误原因
+
+
+例如：
+
+open: No such file or directory
+
+或：
+
+open: Permission denied
+
+
+==================================================
+十、什么时候调用 perror
+==================================================
+
+必须先确认系统调用确实失败。
+
+正确：
+
+fd = open("a.txt", O_RDONLY);
+
+if (fd < 0)
+{
+    perror("open");
+    return 1;
+}
+
+
+不要无条件调用：
+
+fd = open("a.txt", O_RDONLY);
+perror("open");
+
+因为即使 open() 成功，errno 中也可能残留旧错误值，
+导致 perror() 输出误导信息。
+
+
+==================================================
+十一、open/read/write/close 中使用 perror
+==================================================
+
+open：
+
+fd = open("a.txt", O_RDONLY);
+
+if (fd < 0)
+{
+    perror("open");
+    return 1;
+}
+
+
+read：
+
+re = read(fd, buf, sizeof(buf));
+
+if (re < 0)
+{
+    perror("read");
+    close(fd);
+    return 1;
+}
+
+
+write：
+
+wr = write(fd, buf, count);
+
+if (wr < 0)
+{
+    perror("write");
+    close(fd);
+    return 1;
+}
+else if ((size_t)wr != count)
+{
+    printf("partial write: expected %zu, actual %zd\n",
+           count, wr);
+}
+
+
+注意：
+
+wr < 0
+表示系统调用失败，可以 perror("write")。
+
+0 <= wr < count
+表示部分写入。
+
+部分写入不一定设置可用 errno，
+所以需要自己输出实际写入数量。
+
+
+close：
+
+if (close(fd) < 0)
+{
+    perror("close");
+    return 1;
+}
+
+
+==================================================
+十二、errno.h 是否必须
+==================================================
+
+只使用：
+
+perror("open");
+
+通常只需要：
+
+#include <stdio.h>
+
+
+只有直接访问或比较 errno 时，才需要：
+
+#include <errno.h>
+
+
+例如：
+
+if (errno == ENOENT)
+{
+    ...
+}
+
+
+当前阶段只要求会用 perror()，
+不要求记住全部 errno 错误码。
+
+
+==================================================
+十三、demo19 是否需要独立代码
+==================================================
+
+知识点必须保留，
+但没必要为了一个 perror() 再写一套几乎重复的完整 main.c。
+
+更合理的做法：
+
+1. 保留 errno/perror 笔记。
+2. 把 demo15、demo16 中固定 printf 错误提示升级为 perror()。
+3. 部分写入仍然使用自定义提示。
+
+
+==================================================
+十四、demo18 与 demo19 总结
+==================================================
+
+demo18 解决：
+
+fd 是什么
+fd 如何分配
+fd 如何释放
+fd 如何复用
+为什么第一次 open() 常见返回 3
+
+
+demo19 解决：
+
+系统调用失败后，
+如何看到更具体的失败原因
+
+
+核心关系：
+
+open/read/write/close 返回失败
+            ↓
+          errno
+            ↓
+        perror()
+            ↓
+输出具体错误原因
