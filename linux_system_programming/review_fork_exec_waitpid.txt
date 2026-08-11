@@ -1,0 +1,669 @@
+demo26 复习笔记：fork + exec + waitpid 监控独立 worker 程序
+==============================================================
+
+一、为什么学 demo26
+------------------
+
+demo26 不是为了学习一个新的系统调用。
+
+它的作用是把之前已经学过的：
+
+    fork()
+    exec()
+    waitpid()
+    status
+    WIFEXITED()
+    WEXITSTATUS()
+    WIFSIGNALED()
+    WTERMSIG()
+
+真正串成一个完整流程：
+
+    父进程负责管理
+    子进程负责启动另一个独立程序
+    父进程等待并判断这个程序怎么结束
+
+工程上以后可以对应：
+
+    supervisor
+        ↓
+    YOLO 推理程序
+
+    supervisor
+        ↓
+    摄像头服务
+
+    supervisor
+        ↓
+    飞控通信程序
+
+当前 demo26 只做到：
+
+    启动 worker
+    + 判断 worker 的退出状态
+
+暂时不做自动重启。
+
+
+二、程序结构
+-----------
+
+目录可以写成：
+
+    demo26_exec_monitor/
+    ├── supervisor.c
+    └── worker.c
+
+worker.c：
+
+    被 supervisor 启动的独立程序。
+
+supervisor.c：
+
+    负责：
+
+        fork 创建子进程
+        ↓
+        子进程 exec worker
+        ↓
+        父进程 waitpid
+        ↓
+        解析 worker 的结束状态
+
+
+三、worker.c
+-----------
+
+最小 worker：
+
+    #include <stdio.h>
+    #include <unistd.h>
+
+    int main(void)
+    {
+        printf("worker running\n");
+
+        sleep(1);
+
+        return 1;
+    }
+
+这里故意：
+
+    return 1;
+
+它表示：
+
+    worker 使用正常的程序退出方式结束
+    但是退出码为 1
+
+也就是：
+
+    正常退出机制
+    ≠
+    任务一定成功
+
+通常约定：
+
+    return 0
+    → 任务成功
+
+    return 非 0
+    → 程序主动报告失败
+
+注意：
+
+    return 1
+
+不是：
+
+    worker 崩溃
+
+也不是：
+
+    exec 返回了 1
+
+
+四、supervisor.c
+---------------
+
+完整结构：
+
+    #include <stdio.h>
+    #include <unistd.h>
+    #include <sys/wait.h>
+
+    int main(void)
+    {
+        pid_t child;
+        int status;
+
+        child = fork();
+
+        if (child < 0)
+        {
+            perror("fork");
+            return 1;
+        }
+
+        else if (child == 0)
+        {
+            execl("./worker",
+                  "worker",
+                  (char *)NULL);
+
+            perror("execl");
+            return 1;
+        }
+
+        else
+        {
+            if (waitpid(child, &status, 0) < 0)
+            {
+                perror("waitpid");
+                return 1;
+            }
+
+            if (WIFEXITED(status))
+            {
+                printf("worker 正常退出\n");
+                printf("退出码 = %d\n",
+                       WEXITSTATUS(status));
+            }
+
+            else if (WIFSIGNALED(status))
+            {
+                printf("worker 被信号终止\n");
+                printf("信号编号 = %d\n",
+                       WTERMSIG(status));
+            }
+        }
+
+        return 0;
+    }
+
+
+五、整个执行过程
+---------------
+
+启动：
+
+    ./supervisor
+
+然后：
+
+    supervisor
+        ↓
+    fork()
+        ↓
+
+产生两个执行流：
+
+    父进程
+    和
+    子进程
+
+子进程：
+
+    child == 0
+        ↓
+    execl("./worker", ...)
+        ↓
+    exec 成功
+        ↓
+    当前子进程的程序映像
+    从 supervisor
+    替换成 worker
+        ↓
+    worker 的 main() 开始运行
+        ↓
+    worker return 1
+        ↓
+    子进程结束
+
+父进程：
+
+    child > 0
+        ↓
+    waitpid(child, &status, 0)
+        ↓
+    等待这个子进程结束
+        ↓
+    status 得到结束状态
+        ↓
+    四个宏解析
+
+
+六、exec 的核心理解
+------------------
+
+exec 不创建新进程。
+
+它做的是：
+
+    替换当前进程正在执行的程序
+
+例如：
+
+fork 以后：
+
+    父进程：
+        PID = 1000
+        程序 = supervisor
+
+    子进程：
+        PID = 1001
+        程序 = supervisor
+
+子进程执行：
+
+    execl("./worker", ...);
+
+成功后：
+
+    父进程：
+        PID = 1000
+        程序 = supervisor
+
+    子进程：
+        PID = 1001
+        程序 = worker
+
+注意：
+
+    PID 1001 没有变
+
+变化的是：
+
+    这个进程里面运行的程序。
+
+
+七、为什么 exec 后面写 perror
+----------------------------
+
+代码：
+
+    execl("./worker",
+          "worker",
+          (char *)NULL);
+
+    perror("execl");
+    return 1;
+
+这里最重要的规则：
+
+    exec 成功
+    → 不返回
+
+    exec 失败
+    → 返回 -1
+
+所以如果程序居然运行到了：
+
+    perror("execl");
+
+说明：
+
+    execl 没有成功把当前进程替换成 worker。
+
+可以把它记成：
+
+    “我本来应该在 execl 这里彻底变成 worker。
+
+     如果我还能执行 execl 的下一行，
+     那就证明替换失败了。”
+
+
+八、exec 为什么可能失败
+----------------------
+
+不是说 exec 经常失败。
+
+正常情况下：
+
+    worker 文件存在
+    路径正确
+    有执行权限
+    文件格式正确
+
+那么 exec 通常会正常成功。
+
+但工程代码必须处理失败情况，例如：
+
+    ./worker 不存在
+
+    路径写错
+
+    没有执行权限
+
+    文件无法作为可执行程序运行
+
+    系统资源等原因导致执行失败
+
+例如：
+
+    execl("./wroker", ...);
+
+把 worker 拼错了。
+
+那么：
+
+    execl 返回 -1
+    ↓
+    perror("execl")
+    ↓
+    子进程 return 1
+
+所以 exec 后面的错误处理属于：
+
+    防止“worker 根本没有启动起来”。
+
+
+九、必须区分两种失败
+------------------
+
+第一种：
+
+    exec 本身失败
+
+例如：
+
+    worker 文件不存在
+
+流程：
+
+    execl()
+        ↓
+    返回 -1
+        ↓
+    perror("execl")
+        ↓
+    子进程 return 1
+
+
+第二种：
+
+    exec 已经成功
+    worker 后来自己失败
+
+流程：
+
+    execl 成功
+        ↓
+    已经进入 worker
+        ↓
+    worker 运行
+        ↓
+    return 1
+        ↓
+    父进程 waitpid
+        ↓
+    WIFEXITED(status)
+        ↓
+    WEXITSTATUS(status) == 1
+
+第二种情况下：
+
+    exec 没有失败。
+
+失败的是：
+
+    worker 执行任务后的结果。
+
+
+十、worker return 1 不是 execl 返回 1
+------------------------------------
+
+execl：
+
+    成功
+    → 不返回
+
+    失败
+    → 返回 -1
+
+worker：
+
+    return 1;
+
+表示：
+
+    worker 这个程序最后以退出码 1 结束。
+
+完整流程：
+
+    execl 成功
+        ↓
+    worker 开始执行
+        ↓
+    worker return 1
+        ↓
+    进程退出码 = 1
+        ↓
+    父进程 waitpid
+        ↓
+    WEXITSTATUS(status)
+        ↓
+    得到 1
+
+
+十一、waitpid
+------------
+
+代码：
+
+    waitpid(child, &status, 0);
+
+三个参数：
+
+    child
+        指定等待 PID 为 child 的子进程。
+
+    &status
+        把 status 的地址交给 waitpid。
+        waitpid 把子进程结束信息写入 status。
+
+    0
+        不使用额外 options。
+        当前这里表示阻塞等待。
+
+注意：
+
+    &status
+    → 给 waitpid() 使用
+
+后面的宏使用：
+
+    status
+
+而不是：
+
+    &status
+
+
+十二、status 与四个宏
+--------------------
+
+status 不是直接退出码。
+
+它是：
+
+    编码后的进程结束状态信息。
+
+先判断：
+
+    WIFEXITED(status)
+
+如果为真：
+
+    WEXITSTATUS(status)
+
+得到正常退出码。
+
+如果：
+
+    WIFSIGNALED(status)
+
+为真：
+
+    WTERMSIG(status)
+
+得到终止该进程的信号编号。
+
+worker 当前：
+
+    return 1;
+
+因此预期：
+
+    WIFEXITED(status)
+    → 真
+
+    WEXITSTATUS(status)
+    → 1
+
+
+十三、signal 与 exec 的区别
+--------------------------
+
+写 demo26 时容易联想到 demo25 的 signal。
+
+但是两者完全不是一个层级。
+
+signal：
+
+    signal(SIGTERM, handler);
+
+作用：
+
+    给当前进程提前登记一个信号处理函数。
+
+也就是：
+
+    收到某种信号
+    → 执行某个函数
+
+它关注：
+
+    函数级的信号处理。
+
+exec：
+
+    execl("./worker", ...);
+
+作用：
+
+    把当前进程整个程序映像替换成另一个程序。
+
+它关注：
+
+    整个程序级别的替换。
+
+最短区别：
+
+    signal
+    → 收到信号后进入指定处理函数
+
+    exec
+    → 当前进程直接换成另一个完整程序
+
+所以 demo26 当前：
+
+    不需要为了复用 demo25
+    强行加入 signal()。
+
+
+十四、demo25 与 demo26 的区别
+----------------------------
+
+demo25：
+
+    signal()
+    ↓
+    提前登记 handler
+    ↓
+    kill() 发送 SIGTERM
+    ↓
+    handler 执行
+    ↓
+    stop = 1
+    ↓
+    当前程序自己正常退出
+
+核心：
+
+    一个进程如何处理外部信号。
+
+
+demo26：
+
+    fork()
+    ↓
+    子进程 exec()
+    ↓
+    替换成 worker
+    ↓
+    worker 结束
+    ↓
+    父进程 waitpid()
+    ↓
+    宏解析 status
+
+核心：
+
+    一个进程如何启动并监控另一个独立程序。
+
+
+十五、demo26 最短记忆版
+----------------------
+
+    supervisor
+        ↓
+    fork()
+        ↓
+    子进程
+        ↓
+    exec("./worker")
+        ↓
+    worker
+        ↓
+    return 1
+
+父进程：
+
+    waitpid(child, &status, 0)
+        ↓
+    WIFEXITED(status)
+        ↓
+    WEXITSTATUS(status)
+        ↓
+    得到 1
+
+一句话总结：
+
+    父进程负责管理，
+    子进程通过 exec 去执行独立 worker，
+    父进程通过 waitpid + status 判断 worker 最终怎么结束。
+
+
+十六、当前阶段不做的内容
+----------------------
+
+demo26 当前暂时不加入：
+
+    signal
+    自动重启
+    重启次数限制
+    WNOHANG 非阻塞监控
+    多 worker 管理
+
+因为当前目标只是把：
+
+    fork
+    + exec
+    + waitpid
+    + status
+
+这一整条进程管理链真正串通。
+
+这些复杂策略以后遇到真实工程需求时再加入。

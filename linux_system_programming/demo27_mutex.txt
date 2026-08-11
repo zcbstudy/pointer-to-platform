@@ -1,0 +1,445 @@
+demo27_mutex_notes.txt
+RoadToEmbedded · Linux 系统编程
+主题：pthread 共享数据、结构体传参与 mutex
+日期：2026-08-12
+
+一、为什么学 mutex
+同一进程中的多个线程共享进程地址空间。
+如果两个线程同时对同一个普通共享对象进行冲突访问（至少一个是写操作），就会产生 data race。
+在 C 语言并发语义中，未同步的数据竞争属于未定义行为。
+
+mutex（互斥锁）的作用：
+让多个线程在访问某段共享可变数据时，按约定一次只允许一个线程进入临界区。
+
+注意：
+mutex 不会“自动知道”自己保护哪个变量。
+是程序员规定：
+    修改共享数据前 lock
+    修改完成后 unlock
+所有会访问该共享数据的线程都必须遵守同一规则。
+
+
+二、本 demo 的共享结构
+
+struct Shared
+{
+    int count;
+    pthread_mutex_t mutex;
+};
+
+main 中：
+
+struct Shared data;
+
+这里：
+    struct Shared    -> 结构体类型
+    data             -> 这个类型创建出的结构体对象
+    data.count       -> 共享计数
+    data.mutex       -> 用于保护共享计数的互斥锁
+
+
+三、为什么使用结构体传参
+
+pthread_create() 的第四个参数只有一个：
+
+void *arg
+
+线程如果同时需要：
+    count
+    mutex
+
+可以把它们放进同一个结构体，然后只传结构体地址。
+
+main：
+
+pthread_create(&a, NULL, worker, &data);
+pthread_create(&b, NULL, worker, &data);
+
+两个线程传入的都是同一个：
+
+&data
+
+不是复制两份 data，而是两个线程都拿到同一个 data 对象的地址。
+
+关系：
+
+                main 中的 data
+              ┌──────────────┐
+              │ count        │
+              │ mutex        │
+              └──────────────┘
+                     ↑
+                  &data
+                 /     \
+             线程 A    线程 B
+
+
+四、void *arg 如何重新找到结构体
+
+线程入口函数：
+
+void *worker(void *arg)
+
+pthread_create() 把 &data 作为 void * 交给 worker。
+
+worker 中恢复类型：
+
+struct Shared *data = arg;
+
+此时 worker 里的 data 是“指向 struct Shared 的指针”。
+
+所以访问成员使用：
+
+data->count
+data->mutex
+
+这里的链条必须记住：
+
+&data
+  ↓
+pthread_create 第四参数
+  ↓
+void *arg
+  ↓
+struct Shared *data = arg
+  ↓
+data->count / data->mutex
+
+
+五、局部变量和共享变量
+
+worker 中：
+
+int local = 0;
+
+每个线程调用 worker 时，都有自己的执行状态和自己的栈，因此：
+
+线程 A：local_A
+线程 B：local_B
+
+它们不是同一个 local。
+
+但两个线程通过同一个 &data 得到的：
+
+data->count
+data->mutex
+
+是同一份共享对象。
+
+
+六、为什么不用 lock/unlock 十万次
+
+最直观但低效的写法：
+
+for (...)
+{
+    pthread_mutex_lock(&data->mutex);
+    data->count++;
+    pthread_mutex_unlock(&data->mutex);
+}
+
+每个线程会 lock/unlock 十万次，锁粒度太细，额外同步开销很大。
+
+本 demo 使用：
+
+int local = 0;
+
+for (int i = 0; i < 100000; i++)
+{
+    local++;
+}
+
+pthread_mutex_lock(&data->mutex);
+data->count += local;
+pthread_mutex_unlock(&data->mutex);
+
+每个线程先独立计算 local，不需要锁。
+只有最终合并到共享 count 时才加锁。
+
+线程 A：
+    local_A = 100000
+
+线程 B：
+    local_B = 100000
+
+共享 count：
+    0
+    +100000
+    =100000
+    +100000
+    =200000
+
+B 不是把 count 从 100001 一次次加到 200000，
+而是执行一次：
+
+data->count += local;
+
+
+七、mutex 初始化
+
+本 demo 使用 pthread 库提供的：
+
+pthread_mutex_init(&data.mutex, NULL);
+
+函数原型：
+
+int pthread_mutex_init(
+    pthread_mutex_t *mutex,
+    const pthread_mutexattr_t *attr
+);
+
+参数：
+    &data.mutex -> 要初始化的 mutex
+    NULL        -> 使用默认 mutex 属性
+
+返回值：
+    0     -> 成功
+    非 0  -> 错误号
+
+pthread_mutex_init() 不是自己写的函数，
+它是 pthread/POSIX 提供的 API。
+
+
+八、count 也必须初始化
+
+data 是 main() 中的普通局部自动变量：
+
+struct Shared data;
+
+因此 data.count 不能假设自动为 0。
+
+必须明确：
+
+data.count = 0;
+
+注意：
+如果对象是具有静态存储期的全局变量或 static 变量，
+未显式初始化的整型对象会进行零初始化；
+但本 demo 的 main 局部 data 不适用这个规则。
+
+
+九、lock / unlock
+
+加锁：
+
+pthread_mutex_lock(&data->mutex);
+
+修改共享数据：
+
+data->count += local;
+
+解锁：
+
+pthread_mutex_unlock(&data->mutex);
+
+严谨表达：
+
+“锁的是 data 里面的 mutex 成员，
+并用这把 mutex 保护 data 里面的 count。”
+
+不是“把整个结构体物理锁住”。
+
+另外：
+lock = 加锁 / 获取锁
+unlock = 解锁 / 释放锁
+deadlock = 死锁，是程序无法继续推进的一种错误状态
+“加锁”和“死锁”不是同一个概念。
+
+
+十、mutex 生命周期
+
+顺序：
+
+struct Shared data
+    ↓
+data.count = 0
+    ↓
+pthread_mutex_init(&data.mutex, NULL)
+    ↓
+pthread_create(...)
+    ↓
+worker 中 lock / 修改 / unlock
+    ↓
+pthread_join(...)
+    ↓
+pthread_mutex_destroy(&data.mutex)
+
+只有确认不会再有线程使用这把 mutex 后，才能 destroy。
+本 demo 中先 join 两个线程，再 destroy。
+
+
+十一、三个 NULL 不是一个意思
+
+1. pthread_create
+
+pthread_create(&a, NULL, worker, &data);
+
+第二参数 NULL：
+    使用默认线程属性
+    类型涉及 pthread_attr_t
+
+2. pthread_mutex_init
+
+pthread_mutex_init(&data.mutex, NULL);
+
+第二参数 NULL：
+    使用默认 mutex 属性
+    类型涉及 pthread_mutexattr_t
+
+3. pthread_join
+
+pthread_join(a, NULL);
+
+第二参数 NULL：
+    不接收线程入口函数返回的 void * 返回值
+
+所以：
+虽然都写 NULL，但语义完全不同。
+
+
+十二、pthread_create 四参数模型
+
+int pthread_create(
+    pthread_t *thread,
+    const pthread_attr_t *attr,
+    void *(*start_routine)(void *),
+    void *arg
+);
+
+可以理解为：
+
+pthread_create(
+    新线程标识写到哪里,
+    新线程使用什么属性,
+    新线程从哪个函数开始执行,
+    给线程入口函数传什么数据
+);
+
+例如：
+
+pthread_create(&a, NULL, worker, &data);
+
+&a      -> 把新线程标识写入 a
+NULL    -> 默认线程属性
+worker  -> 新线程执行 worker()
+&data   -> 把共享结构体地址交给 worker
+
+
+十三、pthread API 返回值
+
+pthread_create()、pthread_mutex_init() 等 pthread API：
+    返回 0     -> 成功
+    返回非 0  -> 错误号
+
+“非 0”表示本次调用失败，
+不能简单等价成“程序一定有 bug”，
+例如也可能是系统资源不足等运行环境问题。
+
+
+十四、最终代码参考
+
+#include <stdio.h>
+#include <pthread.h>
+
+struct Shared
+{
+    int count;
+    pthread_mutex_t mutex;
+};
+
+void *worker(void *arg)
+{
+    struct Shared *data = arg;
+
+    int local = 0;
+
+    for (int i = 0; i < 100000; i++)
+    {
+        local++;
+    }
+
+    pthread_mutex_lock(&data->mutex);
+
+    data->count += local;
+
+    pthread_mutex_unlock(&data->mutex);
+
+    return NULL;
+}
+
+int main(void)
+{
+    pthread_t a;
+    pthread_t b;
+    struct Shared data;
+
+    int ret;
+
+    data.count = 0;
+
+    ret = pthread_mutex_init(&data.mutex, NULL);
+    if (ret != 0)
+    {
+        fprintf(stderr, "pthread_mutex_init error: %d\n", ret);
+        return 1;
+    }
+
+    ret = pthread_create(&a, NULL, worker, &data);
+    if (ret != 0)
+    {
+        fprintf(stderr, "pthread_create a error: %d\n", ret);
+        pthread_mutex_destroy(&data.mutex);
+        return 1;
+    }
+
+    ret = pthread_create(&b, NULL, worker, &data);
+    if (ret != 0)
+    {
+        fprintf(stderr, "pthread_create b error: %d\n", ret);
+
+        pthread_join(a, NULL);
+        pthread_mutex_destroy(&data.mutex);
+        return 1;
+    }
+
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+
+    printf("count = %d\n", data.count);
+
+    pthread_mutex_destroy(&data.mutex);
+
+    return 0;
+}
+
+编译：
+
+gcc -Wall -Wextra -std=c11 demo27_mutex.c -o demo27 -pthread
+
+预期结果（线程创建和 mutex 操作均成功时）：
+
+count = 200000
+
+
+十五、今晚真正踩到的坑
+
+1. struct Shared 是类型，data 是对象。
+2. pthread_create 第四参数传的是 &data，不是 data 本身。
+3. &data 经 void *arg 进入 worker，再恢复成 struct Shared *。
+4. 结构体指针访问成员使用 ->。
+5. 两个线程传同一个 &data，因此共享同一个 count 和 mutex。
+6. mutex 锁的是 mutex 对象，不是整个结构体。
+7. mutex 保护谁，是程序设计约定，不是 mutex 自动识别。
+8. worker 中的 local 是每个线程各自一份。
+9. count 是共享的，必须正确初始化。
+10. 不要为了计数每次都 lock/unlock；尽量缩短临界区。
+11. pthread_create / pthread_mutex_init / pthread_join 中的 NULL 含义不同。
+12. “加锁”不是“死锁”；死锁是错误状态。
+
+
+十六、当前阶段一句话总结
+
+两个线程通过同一个 &data 共享同一个结构体；
+各自在自己的 local 中完成独立计算；
+最后使用 data->mutex 串行保护 data->count 的合并操作，
+从而在避免 data race 的同时减少锁的持有时间和调用次数。

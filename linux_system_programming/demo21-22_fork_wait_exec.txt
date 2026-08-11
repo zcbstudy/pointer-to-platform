@@ -1,0 +1,541 @@
+RoadToEmbedded
+demo22_exec 进程替换与进程树学习笔记
+
+一、核心目标
+
+理解：
+
+1. exec() 不创建新进程。
+2. exec() 会把当前进程正在运行的程序整体替换。
+3. exec() 成功后，当前进程 PID 不变。
+4. fork()、exec()、wait() 如何组合。
+5. 被 exec() 换进去的新程序仍然可以继续 fork()。
+6. 父子进程如何逐级回收。
+
+
+二、fork() 与 exec() 的区别
+
+fork()：
+
+创建一个新的子进程。
+
+调用成功后：
+
+原父进程继续存在，
+同时新增一个子进程。
+
+
+exec()：
+
+不创建新进程。
+
+它把当前进程原来的程序替换成另一个可执行程序。
+
+
+可以记为：
+
+fork()
+-> 增加一个进程
+
+exec()
+-> 不增加进程
+-> 给现有进程更换程序
+
+
+三、exec() 的本质
+
+例如：
+
+execl("./worker", "worker", (char *)NULL);
+
+含义：
+
+把当前子进程原来的程序替换成当前目录中的 worker 程序。
+
+
+执行过程：
+
+子进程执行原程序
+        |
+        v
+调用 execl()
+        |
+        v
+原程序的代码、全局变量、栈、堆等被替换
+        |
+        v
+同一个 PID 开始执行 worker 的 main()
+
+
+exec() 成功后：
+
+1. 当前进程 PID 不变。
+2. 原程序后面的代码不再执行。
+3. 新程序从自己的入口开始运行。
+
+
+四、为什么 exec() 后面通常写错误处理
+
+execl("./worker", "worker", (char *)NULL);
+
+perror("execl");
+return 1;
+
+
+如果 execl() 成功：
+
+当前程序已经被 worker 替换，
+不会执行 perror()。
+
+
+如果 execl() 失败：
+
+execl() 返回 -1，
+errno 被设置，
+程序才会继续执行 perror("execl")。
+
+
+五、execl() 的参数
+
+无额外参数时：
+
+execl("./worker", "worker", (char *)NULL);
+
+
+"./worker"
+
+表示要加载的可执行程序路径。
+
+
+"worker"
+
+表示新程序的 argv[0]，
+通常写程序名。
+
+
+(char *)NULL
+
+表示可变参数列表结束，
+最后必须保留。
+
+
+新程序不读取命令行参数时，
+不需要在 NULL 前增加其他字符串。
+
+
+六、目标文件与可执行文件
+
+下面命令只生成目标文件：
+
+gcc -c worker.c -o worker.o
+
+
+worker.o 通常不能直接交给 exec() 运行，
+因为它还没有完成链接。
+
+
+需要链接为可执行程序：
+
+gcc worker.o -o worker
+
+
+或者直接编译并链接：
+
+gcc -Wall -Wextra -std=c11 worker.c -o worker
+
+
+然后：
+
+execl("./worker", "worker", (char *)NULL);
+
+
+工程中不建议把可执行文件命名为 .o，
+因为 .o 通常表示目标文件。
+
+
+七、fork + exec + wait 的基本模型
+
+典型结构：
+
+父进程
+   |
+   +-- fork()
+          |
+          +-- 父进程：
+          |      wait()
+          |      等待并回收子进程
+          |
+          +-- 子进程：
+                 exec()
+                 换成另一个程序
+
+
+完整流程：
+
+父进程 fork()
+        |
+        v
+创建子进程
+        |
+        +---- 父进程调用 wait()
+        |
+        +---- 子进程调用 exec()
+                    |
+                    v
+             运行另一个完整程序
+                    |
+                    v
+               新程序结束
+                    |
+                    v
+             父进程完成回收
+
+
+可以概括为：
+
+fork()：
+创建执行位置
+
+exec()：
+装入实际程序
+
+wait()：
+等待并回收
+
+
+八、exec() 可以运行大型程序
+
+exec() 不只能运行 ls。
+
+它可以加载：
+
+1. 自己编译的 C/C++ 程序
+2. 摄像头采集程序
+3. YOLO 推理程序
+4. 飞控通信程序
+5. 网络服务程序
+6. Python 解释器及脚本
+7. 完整大型工程
+
+
+程序规模不会改变 exec() 的机制。
+
+无论新程序是几十行还是几十万行，
+exec() 都是把当前进程整体替换成该程序。
+
+
+九、新程序中仍然可以 fork()
+
+exec() 换进去的新程序仍然是一个正常 Linux 进程。
+
+它仍然可以调用：
+
+fork()
+wait()
+exec()
+open()
+read()
+write()
+
+
+例如：
+
+launcher 创建子进程 A
+        |
+        v
+A exec() 变成 worker
+        |
+        v
+worker 再 fork()
+        |
+        v
+创建子进程 B
+
+
+注意：
+
+不是 exec() 自带新的 fork()。
+
+准确说法是：
+
+exec() 换进去的新程序内部，
+可以再次主动调用 fork()。
+
+
+十、进程回收关系
+
+假设：
+
+launcher
+-> fork 创建 A
+
+A exec 成 worker
+
+worker
+-> fork 创建 B
+
+
+回收关系：
+
+launcher 回收 A
+
+worker 回收 B
+
+
+通常遵循：
+
+谁 fork() 创建的子进程，
+谁负责 wait() / waitpid() 回收。
+
+
+进程树：
+
+launcher
+   |
+   +-- A（exec 后运行 worker）
+          |
+          +-- B
+
+
+launcher 不能通过普通 wait() 直接回收 B，
+因为 B 不是 launcher 的直接子进程。
+
+worker 先回收 B。
+
+worker 结束后，
+launcher 再回收 worker。
+
+
+十一、目录结构
+
+demo22/
+├── launcher.c
+└── worker.c
+
+
+launcher.c：
+
+1. fork() 创建子进程 A。
+2. 子进程 A exec() 运行 worker。
+3. launcher 父进程 wait() 回收 A。
+
+
+worker.c：
+
+1. worker 启动。
+2. worker 再 fork() 创建子进程 B。
+3. B 执行任务并退出。
+4. worker wait() 回收 B。
+5. worker 最后退出。
+
+
+十二、launcher.c
+
+#include <unistd.h>
+#include <sys/wait.h>
+#include <stdio.h>
+
+int main(void)
+{
+    pid_t child;
+    pid_t wait_pid;
+    int status;
+
+    child = fork();
+
+    if (child < 0)
+    {
+        perror("fork");
+        return 1;
+    }
+    else if (child == 0)
+    {
+        printf("[launcher子进程] 准备执行worker\n");
+
+        execl("./worker", "worker", (char *)NULL);
+
+        perror("execl");
+        return 1;
+    }
+    else
+    {
+        printf("[launcher父进程] 创建的子进程PID = %d\n",
+               (int)child);
+
+        wait_pid = wait(&status);
+
+        if (wait_pid < 0)
+        {
+            perror("wait");
+            return 1;
+        }
+
+        if (WIFEXITED(status))
+        {
+            printf("[launcher父进程] worker正常结束，退出码 = %d\n",
+                   WEXITSTATUS(status));
+        }
+        else if (WIFSIGNALED(status))
+        {
+            printf("[launcher父进程] worker被信号%d终止\n",
+                   WTERMSIG(status));
+        }
+
+        printf("[launcher父进程] 回收的PID = %d\n",
+               (int)wait_pid);
+    }
+
+    return 0;
+}
+
+
+十三、worker.c
+
+#include <unistd.h>
+#include <sys/wait.h>
+#include <stdio.h>
+
+int main(void)
+{
+    pid_t child;
+    pid_t wait_pid;
+    int status;
+
+    printf("[worker] 新程序已经启动\n");
+
+    child = fork();
+
+    if (child < 0)
+    {
+        perror("fork");
+        return 1;
+    }
+    else if (child == 0)
+    {
+        printf("[worker子进程] 执行任务B\n");
+        return 5;
+    }
+    else
+    {
+        printf("[worker父进程] 创建的子进程PID = %d\n",
+               (int)child);
+
+        wait_pid = wait(&status);
+
+        if (wait_pid < 0)
+        {
+            perror("wait");
+            return 1;
+        }
+
+        if (WIFEXITED(status))
+        {
+            printf("[worker父进程] 子进程正常结束，退出码 = %d\n",
+                   WEXITSTATUS(status));
+        }
+        else if (WIFSIGNALED(status))
+        {
+            printf("[worker父进程] 子进程被信号%d终止\n",
+                   WTERMSIG(status));
+        }
+
+        printf("[worker父进程] 回收的PID = %d\n",
+               (int)wait_pid);
+    }
+
+    printf("[worker] 整个worker程序结束\n");
+
+    return 0;
+}
+
+
+十四、编译与运行
+
+先编译 worker：
+
+gcc -Wall -Wextra -std=c11 worker.c -o worker
+
+
+再编译 launcher：
+
+gcc -Wall -Wextra -std=c11 launcher.c -o launcher
+
+
+运行：
+
+./launcher
+
+
+必须保证 launcher 与 worker 位于当前工作目录中，
+因为代码使用：
+
+execl("./worker", ...)
+
+
+十五、典型输出
+
+[launcher父进程] 创建的子进程PID = 13001
+[launcher子进程] 准备执行worker
+[worker] 新程序已经启动
+[worker父进程] 创建的子进程PID = 13002
+[worker子进程] 执行任务B
+[worker父进程] 子进程正常结束，退出码 = 5
+[worker父进程] 回收的PID = 13002
+[worker] 整个worker程序结束
+[launcher父进程] worker正常结束，退出码 = 0
+[launcher父进程] 回收的PID = 13001
+
+
+部分输出顺序可能变化，
+因为多个进程由内核调度。
+
+但生命周期关系固定：
+
+1. launcher 创建 A。
+2. A exec 成 worker。
+3. worker 创建 B。
+4. worker 回收 B。
+5. worker 结束。
+6. launcher 回收 worker。
+
+
+十六、与 demo21 的关系
+
+demo21：
+
+fork()
+-> 子进程执行原程序中的代码
+-> 子进程退出
+-> 父进程 wait()
+
+
+demo22：
+
+fork()
+-> 子进程 exec() 换成另一个程序
+-> 新程序执行
+-> 新程序还可以继续 fork()
+-> 新程序退出
+-> 父进程 wait()
+
+
+所以 demo22 本质上是：
+
+在 demo21 的子进程分支中加入 exec()，
+再验证新程序仍然拥有完整的进程能力。
+
+
+十七、核心结论
+
+1. exec() 不创建新进程。
+2. exec() 替换当前进程正在运行的程序。
+3. exec() 成功后 PID 不变。
+4. exec() 成功后不会返回原程序。
+5. exec() 失败时才会执行后面的 perror()。
+6. exec() 可以运行完整的大型程序。
+7. 新程序不需要参数时，只保留 argv[0] 和 NULL。
+8. NULL 是参数列表结束标志，不能省略。
+9. .o 通常是目标文件，不能直接作为可执行程序运行。
+10. exec() 换进去的新程序仍然可以 fork()。
+11. 每个父进程通常负责回收自己直接创建的子进程。
+12. fork + exec + wait 构成 Linux 启动和管理程序的基本模型。

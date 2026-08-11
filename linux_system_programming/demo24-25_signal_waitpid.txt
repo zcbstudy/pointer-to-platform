@@ -1,0 +1,813 @@
+一、demo24：父进程发送 SIGTERM，子进程被信号终止
+------------------------------------------------
+
+1. 目标
+
+demo24 的核心是：
+
+    父进程
+    → 给子进程发送 SIGTERM
+    → 子进程使用 SIGTERM 的默认处理方式
+    → 子进程被终止
+    → 父进程 wait / waitpid 回收
+    → 解析子进程为什么结束
+
+
+2. kill()
+
+头文件：
+
+    #include <signal.h>
+
+典型调用：
+
+    kill(child, SIGTERM);
+
+含义：
+
+    向 PID 为 child 的进程发送 SIGTERM。
+
+注意：
+
+    kill() 的本质不是“一定杀死进程”，
+    而是“向指定进程发送一个信号”。
+
+SIGTERM 的默认行为通常是：
+
+    终止进程
+
+
+3. demo24 中子进程为什么要 while(1)
+
+例如：
+
+    while (1)
+    {
+        sleep(1);
+    }
+
+作用：
+
+    让子进程持续存在，
+    等待父进程发来 SIGTERM。
+
+如果子进程直接执行到 main 结尾：
+
+    main 执行结束
+    → 子进程正常退出
+
+那就没有机会观察“被 SIGTERM 终止”的情况。
+
+
+4. 为什么 while 中加 sleep(1)
+
+如果写：
+
+    while (1)
+    {
+    }
+
+这会形成忙循环，占用大量 CPU。
+
+写成：
+
+    while (1)
+    {
+        sleep(1);
+    }
+
+可以减少 CPU 占用。
+
+注意：
+
+    sleep() 在这里不是严格同步手段。
+
+
+5. 父进程为什么 sleep(2)
+
+例如：
+
+    sleep(2);
+    kill(child, SIGTERM);
+
+这里只是演示：
+
+    让子进程先运行一会儿
+    → 再发送 SIGTERM
+
+这不是严谨的进程同步机制。
+
+
+6. wait / waitpid 与 status
+
+例如：
+
+    int status;
+
+    waitpid(child, &status, 0);
+
+含义：
+
+    child
+    → 指定等待哪个子进程
+
+    &status
+    → 把子进程结束状态写入 status
+
+    0
+    → 不加特殊 options，阻塞等待
+
+注意：
+
+    status 不是单纯的退出码，
+    而是编码后的子进程结束状态信息。
+
+
+7. 四个宏
+
+正常退出：
+
+    WIFEXITED(status)
+    → 判断是否正常退出
+
+    WEXITSTATUS(status)
+    → 如果正常退出，取得退出码
+
+被信号终止：
+
+    WIFSIGNALED(status)
+    → 判断是否被信号终止
+
+    WTERMSIG(status)
+    → 如果被信号终止，取得终止它的信号编号
+
+记忆：
+
+    IF EXITED
+    → EXIT STATUS
+
+    IF SIGNALED
+    → TERM SIG
+
+
+8. demo24 预期结果
+
+父进程：
+
+    kill(child, SIGTERM);
+
+子进程没有自定义处理 SIGTERM。
+
+因此：
+
+    SIGTERM 到达
+    → 使用默认动作
+    → 子进程被信号终止
+
+父进程解析：
+
+    WIFSIGNALED(status)
+    → 真
+
+    WTERMSIG(status)
+    → 得到 SIGTERM 对应的信号编号
+
+
+9. return 15 和 SIGTERM 的区别
+
+这是 demo24 非常重要的点。
+
+情况 A：
+
+    子进程：
+
+        return 15;
+
+这是：
+
+    正常退出
+    → 退出码是 15
+
+因此：
+
+    WIFEXITED(status)
+    → 真
+
+    WEXITSTATUS(status)
+    → 15
+
+
+情况 B：
+
+    父进程：
+
+        kill(child, SIGTERM);
+
+子进程被 SIGTERM 终止。
+
+这是：
+
+    被信号终止
+
+因此：
+
+    WIFSIGNALED(status)
+    → 真
+
+    WTERMSIG(status)
+    → SIGTERM 对应的编号
+
+即使两个数字碰巧一样，
+结束机制也完全不同。
+
+
+二、demo25：signal 登记处理函数，实现优雅退出
+--------------------------------------------
+
+1. 目标
+
+demo25 在 demo24 基础上增加：
+
+    signal()
+
+不再让 SIGTERM 直接终止子进程。
+
+而是：
+
+    子进程提前登记 SIGTERM 的处理函数
+    → 父进程发送 SIGTERM
+    → Linux 执行处理函数
+    → 修改 stop
+    → 子进程自己退出循环
+    → 清理资源
+    → return 0
+    → 父进程正常回收
+
+
+2. signal()
+
+头文件：
+
+    #include <signal.h>
+
+典型调用：
+
+    signal(SIGTERM, handle_sigterm);
+
+含义：
+
+    提前登记：
+
+    “当前进程以后收到 SIGTERM 时，
+     执行 handle_sigterm()。”
+
+注意：
+
+    signal() 必须在信号到来之前执行。
+
+
+3. signal() 和 kill() 的关系
+
+最短记忆：
+
+    signal()
+    → 提前登记怎么处理信号
+
+    kill()
+    → 真正发送信号
+
+正确顺序：
+
+    子进程：
+        signal(SIGTERM, handle_sigterm);
+
+    然后正常运行
+
+    父进程：
+        kill(child, SIGTERM);
+
+    然后：
+
+        SIGTERM 到达 child
+        → Linux 执行 handle_sigterm()
+
+
+4. 为什么不能 kill 以后再 signal
+
+错误顺序：
+
+    kill(child, SIGTERM);
+    ↓
+    signal(SIGTERM, handle_sigterm);
+
+问题：
+
+    SIGTERM 到达时，
+    子进程还没有登记自定义处理函数。
+
+那么：
+
+    SIGTERM 可能直接使用默认动作
+    → 子进程被终止
+
+等到后面再 signal 已经晚了。
+
+
+5. 自定义处理函数
+
+例如：
+
+    volatile sig_atomic_t stop = 0;
+
+    void handle_sigterm(int sig)
+    {
+        (void)sig;
+        stop = 1;
+    }
+
+作用：
+
+    收到 SIGTERM
+    → 不直接做复杂操作
+    → 只把 stop 改为 1
+
+
+6. sig_atomic_t
+
+    sig_atomic_t
+
+是 <signal.h> 提供的一种整数类型。
+
+本 demo 中用于：
+
+    信号处理函数
+    和
+    正常主流程
+
+之间传递一个简单状态。
+
+当前只做：
+
+    stop = 1;
+    while (!stop)
+
+
+7. volatile
+
+定义：
+
+    volatile sig_atomic_t stop = 0;
+
+这里的 volatile 表示：
+
+    stop 可能在当前正常代码之外，
+    被信号处理函数异步修改。
+
+因此主循环每次判断时要重新读取它。
+
+
+8. (void)sig
+
+处理函数：
+
+    void handle_sigterm(int sig)
+
+sig 表示收到的信号编号。
+
+当前 demo 不使用它，所以写：
+
+    (void)sig;
+
+表示：
+
+    这个参数是故意不用的
+
+同时避免编译器未使用参数警告。
+
+
+9. 为什么处理函数只改 stop
+
+信号处理函数可能异步打断程序正常执行。
+
+因此本 demo 采用：
+
+    handler
+    → 只修改 stop
+
+真正的：
+
+    资源清理
+    文件关闭
+    设备释放
+    正常退出
+
+放到主循环退出之后执行。
+
+结构：
+
+    收到 SIGTERM
+    → stop = 1
+    → while(!stop) 结束
+    → 正常代码清理资源
+    → return 0
+
+
+10. signal() 如何判断失败
+
+典型写法：
+
+    if (signal(SIGTERM, handle_sigterm) == SIG_ERR)
+    {
+        perror("signal");
+        return 1;
+    }
+
+SIG_ERR：
+
+    是 <signal.h> 提供的宏
+
+表示：
+
+    signal() 登记失败
+
+signal() 返回规律：
+
+    成功
+    → 返回之前的信号处理方式
+
+    失败
+    → 返回 SIG_ERR
+    → 同时设置 errno
+
+
+11. demo25 的主循环
+
+原来 demo24：
+
+    while (1)
+    {
+        sleep(1);
+    }
+
+demo25：
+
+    while (!stop)
+    {
+        sleep(1);
+    }
+
+开始：
+
+    stop = 0
+    → !stop 为真
+    → 一直运行
+
+收到 SIGTERM：
+
+    handle_sigterm()
+    → stop = 1
+
+然后：
+
+    !stop 为假
+    → 跳出循环
+
+
+12. waitpid()
+
+demo25 中可以使用：
+
+    waitpid(child, &status, 0);
+
+比 wait() 更明确。
+
+含义：
+
+    child
+    → 等待 PID 为 child 的子进程
+
+    &status
+    → 接收子进程结束状态
+
+    0
+    → 阻塞等待，不加额外选项
+
+注意：
+
+    0 不是固定只能写 0。
+
+例如还可以：
+
+    WNOHANG
+
+表示：
+
+    非阻塞检查
+
+但 demo25 当前用 0 即可。
+
+
+13. demo25 的执行流程
+
+    fork()
+    ↓
+
+子进程：
+
+    signal(SIGTERM, handle_sigterm)
+    ↓
+    提前登记 SIGTERM 处理方式
+    ↓
+    while (!stop)
+    ↓
+    等待
+
+父进程：
+
+    kill(child, SIGTERM)
+    ↓
+    给子进程发送 SIGTERM
+
+子进程：
+
+    SIGTERM 到达
+    ↓
+    Linux 调用 handle_sigterm()
+    ↓
+    stop = 1
+    ↓
+    跳出循环
+    ↓
+    清理资源
+    ↓
+    return 0
+
+父进程：
+
+    waitpid(child, &status, 0)
+    ↓
+    回收子进程
+    ↓
+    解析 status
+
+
+14. demo25 中父进程看到什么
+
+因为子进程不是被 SIGTERM 直接终止，
+
+而是：
+
+    收到 SIGTERM
+    → handler 修改 stop
+    → 子进程自己 return 0
+
+所以父进程看到：
+
+    WIFEXITED(status)
+    → 真
+
+    WEXITSTATUS(status)
+    → 0
+
+而不是：
+
+    WIFSIGNALED(status)
+
+
+三、demo24 与 demo25 核心区别
+----------------------------
+
+demo24：
+
+    kill(child, SIGTERM)
+    ↓
+    子进程没有自定义处理
+    ↓
+    SIGTERM 使用默认动作
+    ↓
+    子进程被信号终止
+    ↓
+    WIFSIGNALED(status)
+
+
+demo25：
+
+    子进程先：
+        signal(SIGTERM, handle_sigterm)
+
+    父进程再：
+        kill(child, SIGTERM)
+
+    ↓
+
+    handler 执行
+    ↓
+    stop = 1
+    ↓
+    子进程主动退出循环
+    ↓
+    清理资源
+    ↓
+    return 0
+    ↓
+    WIFEXITED(status)
+
+
+四、最短记忆版
+-------------
+
+demo24：
+
+    kill()
+    → 发 SIGTERM
+    → 默认终止
+    → waitpid()
+    → WIFSIGNALED / WTERMSIG
+
+
+demo25：
+
+    signal()
+    → 提前登记
+
+    kill()
+    → 发送 SIGTERM
+
+    handler()
+    → stop = 1
+
+    while(!stop)
+    → 跳出循环
+
+    return 0
+    → 正常退出
+
+    waitpid()
+    → 回收
+
+    WIFEXITED / WEXITSTATUS
+    → 解析正常退出
+
+
+五、当前必须分清的几个概念
+------------------------
+
+1.
+
+    signal = 信号
+
+不是：
+
+    semaphore = 信号量
+
+
+2.
+
+    kill()
+    → 发信号
+
+不是：
+
+    给 signal() 函数发信号
+
+
+3.
+
+    signal()
+    → 提前登记
+
+不是：
+
+    信号来了以后再登记
+
+
+4.
+
+    status
+    → 编码后的结束状态
+
+不是：
+
+    直接退出码
+
+
+5.
+
+    fork() 返回值
+    → 判断当前是父还是子
+
+    main() 的 return
+    → 当前进程最终退出码
+
+这两个不是一回事。
+
+
+六、建议保留的核心代码结构
+------------------------
+
+    #include <stdio.h>
+    #include <unistd.h>
+    #include <sys/wait.h>
+    #include <signal.h>
+
+    volatile sig_atomic_t stop = 0;
+
+    void handle_sigterm(int sig)
+    {
+        (void)sig;
+        stop = 1;
+    }
+
+    int main(void)
+    {
+        pid_t child;
+        int status;
+
+        child = fork();
+
+        if (child < 0)
+        {
+            perror("fork");
+            return 1;
+        }
+        else if (child == 0)
+        {
+            if (signal(SIGTERM, handle_sigterm) == SIG_ERR)
+            {
+                perror("signal");
+                return 1;
+            }
+
+            while (!stop)
+            {
+                sleep(1);
+            }
+
+            /* 在这里执行资源清理 */
+
+            return 0;
+        }
+        else
+        {
+            sleep(2);
+
+            if (kill(child, SIGTERM) < 0)
+            {
+                perror("kill");
+                return 1;
+            }
+
+            if (waitpid(child, &status, 0) < 0)
+            {
+                perror("waitpid");
+                return 1;
+            }
+
+            if (WIFEXITED(status))
+            {
+                printf("exit code = %d\n",
+                       WEXITSTATUS(status));
+            }
+            else if (WIFSIGNALED(status))
+            {
+                printf("signal = %d\n",
+                       WTERMSIG(status));
+            }
+        }
+
+        return 0;
+    }
+
+
+七、工程理解
+-----------
+
+demo24 学的是：
+
+    “进程被信号终止后，父进程如何知道原因”
+
+demo25 学的是：
+
+    “进程收到停止信号后，不直接被杀死，
+     而是先退出主循环、清理资源，再正常结束”
+
+这个模式以后会用于：
+
+    摄像头程序
+    推理程序
+    网络服务
+    后台守护程序
+    嵌入式 Linux 长时间运行任务
+
+核心思想：
+
+    收到停止请求
+    ≠
+    立刻粗暴结束
+
+而是：
+
+    通知
+    → 停止主任务
+    → 清理资源
+    → 正常退出

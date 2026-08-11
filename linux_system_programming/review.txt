@@ -1,0 +1,424 @@
+Linux 进程与信号复习笔记：fork / exec / signal / kill / waitpid / status
+====================================================================
+
+一、fork()：创建子进程
+--------------------
+
+典型写法：
+
+    pid_t child = fork();
+
+fork() 成功后：
+
+    父进程：
+        child > 0
+        child 的值是“子进程 PID”
+
+    子进程：
+        child == 0
+
+    失败：
+        child == -1
+
+【最容易混淆的点】
+
+fork() 的返回值，和 main() 最后的 return 0 / return 1 不是一回事。
+
+例如父进程中可能：
+
+    child = 12580       // fork() 返回的子进程 PID
+    return 0;           // 父进程自己的退出码
+
+子进程中可能：
+
+    child = 0           // fork() 在子进程中的返回值
+    return 1;           // 子进程自己的退出码
+
+所以：
+
+    fork() 返回值
+    → 用于判断当前是父进程还是子进程
+
+    main() 的 return 值
+    → 表示当前进程最后以什么退出码结束
+
+
+二、exec()：替换当前进程正在运行的程序
+-------------------------------------
+
+例如：
+
+    execl("./worker", "worker", (char *)NULL);
+
+exec 的核心作用：
+
+    不创建新进程
+    而是替换当前进程的程序映像
+
+经典结构：
+
+    父进程
+      ↓
+    fork()
+      ↓
+    子进程
+      ↓
+    exec()
+      ↓
+    worker 程序
+
+重要：
+
+    exec 成功
+    → 当前进程已经被新程序替换
+    → exec 后面的代码不会继续执行
+
+    exec 失败
+    → 返回 -1
+    → 后面的错误处理代码才会继续执行
+
+PID 不会因为 exec 而改变。
+
+
+三、signal()：提前登记信号处理方式
+--------------------------------
+
+典型写法：
+
+    signal(SIGTERM, handle_sigterm);
+
+作用：
+
+    提前告诉 Linux：
+    “以后当前进程收到 SIGTERM 时，
+     执行 handle_sigterm()。”
+
+正确顺序：
+
+    程序启动
+        ↓
+    signal(SIGTERM, handle_sigterm)
+        ↓
+    提前登记处理方式
+        ↓
+    程序继续运行
+        ↓
+    SIGTERM 到达
+        ↓
+    Linux 执行 handle_sigterm()
+
+错误理解：
+
+    SIGTERM 到来
+    → 再调用 signal()
+
+这是错误的。
+
+signal() 必须在信号到来之前登记。
+
+
+四、kill()：向指定进程发送信号
+----------------------------
+
+典型写法：
+
+    kill(child, SIGTERM);
+
+含义：
+
+    向 PID 为 child 的进程发送 SIGTERM
+
+注意：
+
+    kill() 不是“给 signal() 函数发送信号”
+
+而是：
+
+    kill()
+    → 给目标进程发送信号
+
+signal() 和 kill() 的关系：
+
+    signal()
+    → 提前登记“收到信号后怎么处理”
+
+    kill()
+    → 真正把信号发给某个进程
+
+完整关系：
+
+    子进程先执行：
+        signal(SIGTERM, handle_sigterm)
+
+    父进程以后执行：
+        kill(child, SIGTERM)
+
+    然后：
+        SIGTERM 到达 child
+        → Linux 查到 child 已登记处理函数
+        → 执行 handle_sigterm()
+
+
+五、为什么 signal() 必须在 kill() 之前
+--------------------------------------
+
+如果顺序反过来：
+
+    kill(child, SIGTERM)
+        ↓
+    子进程此时还没 signal() 登记
+        ↓
+    SIGTERM 使用默认动作
+        ↓
+    子进程可能直接被终止
+
+这时再执行 signal() 已经晚了。
+
+所以必须记住：
+
+    signal() 先登记
+    ↓
+    kill() 后发送
+    ↓
+    handler 被执行
+
+
+六、waitpid()：等待并回收指定子进程
+----------------------------------
+
+典型写法：
+
+    waitpid(child, &status, 0);
+
+三个参数：
+
+1. child
+
+    指定等待哪个子进程
+    即等待 PID 为 child 的那个直接子进程。
+
+2. &status
+
+    把 status 的地址交给 waitpid()
+
+    waitpid() 会把：
+        “这个子进程是怎么结束的”
+    写入 status。
+
+3. 0
+
+    第三个参数是 options。
+
+    写 0 表示：
+        不加额外选项
+        阻塞等待指定子进程状态变化
+
+当前阶段还知道：
+
+    waitpid(child, &status, WNOHANG);
+
+    → 非阻塞检查
+
+如果使用 WNOHANG，并且 child 还没有结束：
+
+    waitpid() 可以立即返回 0。
+
+
+七、status 不是“退出码”
+---------------------
+
+错误说法：
+
+    status 就是子进程退出码
+
+准确说法：
+
+    status 是编码后的“子进程结束状态信息”
+
+它里面可能表示：
+
+    正常退出
+    正常退出码是多少
+    被信号终止
+    被哪个信号终止
+    等其他状态信息
+
+所以不能直接把 status 当退出码使用。
+
+必须使用宏解析。
+
+
+八、四个常用状态宏
+-----------------
+
+第一组：正常退出
+
+    WIFEXITED(status)
+
+作用：
+
+    判断子进程是否正常退出。
+
+
+    WEXITSTATUS(status)
+
+作用：
+
+    如果子进程是正常退出，
+    提取它的退出码。
+
+
+第二组：被信号终止
+
+    WIFSIGNALED(status)
+
+作用：
+
+    判断子进程是否因为信号而终止。
+
+
+    WTERMSIG(status)
+
+作用：
+
+    如果子进程是被信号终止，
+    提取终止它的信号编号。
+
+
+逻辑上记成：
+
+    正常退出？
+        ↓
+    正常退出码是多少？
+
+    被信号终止？
+        ↓
+    被哪个信号终止？
+
+
+九、waitpid() 与四个宏的完整关系
+-------------------------------
+
+    子进程结束
+        ↓
+    内核记录子进程结束信息
+        ↓
+    父进程调用：
+        waitpid(child, &status, 0)
+        ↓
+    waitpid 把结束状态写入 status
+        ↓
+    四个宏解析 status
+
+注意：
+
+    &status
+    → 是交给 waitpid() 写入数据
+
+    status
+    → 才交给四个宏解析
+
+
+十、完整主线
+-----------
+
+    fork()
+      ↓
+    创建子进程
+
+父进程：
+    child > 0
+
+子进程：
+    child == 0
+
+子进程可以：
+
+    signal(SIGTERM, handler)
+      ↓
+    提前登记 SIGTERM 的处理方式
+
+父进程以后：
+
+    kill(child, SIGTERM)
+      ↓
+    给 child 发送 SIGTERM
+
+子进程收到：
+
+    SIGTERM
+      ↓
+    Linux 执行 handler
+      ↓
+    handler 修改停止标志
+      ↓
+    子进程退出主循环
+      ↓
+    return 0 / return 1 ...
+
+父进程：
+
+    waitpid(child, &status, 0)
+      ↓
+    等待并回收 child
+      ↓
+    status 得到结束状态
+      ↓
+    四个宏解析
+
+
+十一、最短记忆版
+---------------
+
+fork()
+    创建子进程
+
+exec()
+    替换当前进程程序
+
+signal()
+    提前登记收到信号后怎么处理
+
+kill()
+    向指定进程发送信号
+
+waitpid()
+    等待并回收指定子进程
+
+status
+    子进程编码后的结束状态，不是直接退出码
+
+四个宏
+    解析 status
+
+
+十二、当前最需要固定的两个区别
+-----------------------------
+
+1.
+
+    fork() 返回值
+    ≠
+    main() 的 return 退出码
+
+2.
+
+    signal()
+    = 提前登记
+
+    kill()
+    = 真正发送信号
+
+正确顺序：
+
+    signal() 登记
+    ↓
+    kill() 发送
+    ↓
+    handler 执行
+    ↓
+    子进程结束
+    ↓
+    waitpid() 回收
+    ↓
+    四个宏解析 status

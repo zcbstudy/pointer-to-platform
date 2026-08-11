@@ -1,0 +1,848 @@
+demo26 复习笔记：pthread_create + pthread_join + 线程阻塞关系
+==============================================================
+
+一、为什么学 demo26
+------------------
+
+后续 Linux / AIoT 程序里，一个进程往往要同时做很多事情，例如：
+
+    摄像头采集
+    YOLO 推理
+    串口通信
+    网络通信
+    日志记录
+
+如果只有一条执行流：
+
+    采图
+    → 推理
+    → 等串口
+    → 发网络
+    → 再采下一帧
+
+其中任何一步阻塞，后面的工作都要等。
+
+线程解决的是：
+
+    同一个进程内部，
+    可以存在多条执行流并发工作。
+
+
+二、线程和进程的区别
+------------------
+
+fork():
+
+    创建子进程
+
+特点：
+
+    父子进程地址空间相互独立。
+
+
+pthread_create():
+
+    在当前进程内部创建线程
+
+特点：
+
+    多个线程属于同一个进程，
+    共享这个进程的大部分资源。
+
+
+最短记忆：
+
+    fork
+    → 新进程
+
+    pthread_create
+    → 同一进程里的新线程
+
+
+三、demo26 保留的整体结构
+------------------------
+
+demo26 直接建立在 review 上。
+
+整体结构：
+
+    supervisor 进程
+    │
+    ├── main 主线程
+    │    │
+    │    ├── fork()
+    │    │
+    │    ├── waitpid(child, &status, 0)
+    │    │
+    │    └── pthread_join(tid, NULL)
+    │    │
+    │    └── return 0
+    │    │
+    │    └── 结束整个进程
+    │
+    ├── work 线程
+    │    └── pthread_create() 创建
+    │
+    └── fork 出来的子进程
+         └── exec("./worker")
+              └── worker.c 的 main()
+
+
+关键：
+
+    子进程
+    → exec 整个 worker 程序
+
+    父进程
+    → 自己仍然有 main 主线程
+    → 另外 pthread_create 一个 work 线程
+
+
+四、线程入口函数
+--------------
+
+demo26 中线程函数叫：
+
+    work
+
+形式：
+
+    void *work(void *arg)
+    {
+        (void)arg;
+
+        printf("父进程新线程：work 开始\n");
+
+        sleep(1);
+
+        printf("父进程新线程：work 结束\n");
+
+        return NULL;
+    }
+
+
+为什么是：
+
+    void *work(void *arg)
+
+因为 pthread_create 要求线程入口函数使用这种形式。
+
+
+当前：
+
+    void *arg
+    → 暂时不用传入参数
+
+所以：
+
+    (void)arg;
+
+表示：
+
+    这个参数是故意不用的。
+
+
+返回：
+
+    return NULL;
+
+表示：
+
+    当前暂时不向 pthread_join 返回结果。
+
+
+五、pthread_create()
+------------------
+
+头文件：
+
+    #include <pthread.h>
+
+最小调用：
+
+    pthread_t tid;
+    int ret;
+
+    ret = pthread_create(&tid, NULL, work, NULL);
+
+
+四个参数：
+
+1.
+
+    &tid
+
+作用：
+
+    pthread_create 把新线程的线程标识写入 tid。
+
+
+2.
+
+    NULL
+
+作用：
+
+    使用默认线程属性。
+
+
+3.
+
+    work
+
+作用：
+
+    新线程创建成功后，
+    从 work() 函数开始执行。
+
+
+4.
+
+    NULL
+
+作用：
+
+    当前不向 work() 传递参数。
+
+
+六、pthread_create() 的返回值
+---------------------------
+
+注意：
+
+    pthread_t tid
+
+和：
+
+    int ret
+
+不是一个东西。
+
+
+tid：
+
+    保存新线程的线程标识。
+
+
+ret：
+
+    保存 pthread_create() 这次调用是否成功。
+
+
+规则：
+
+    ret == 0
+    → 创建成功
+
+    ret != 0
+    → 创建失败，ret 本身是错误码
+
+
+这和很多 Linux 系统调用不同。
+
+很多系统调用常见：
+
+    失败 → -1
+    errno → 保存错误原因
+
+pthread 函数常见：
+
+    失败 → 直接返回非 0 错误码
+
+
+当前学习阶段可以简单写：
+
+    if (ret != 0)
+    {
+        printf("pthread_create failed, ret = %d\n", ret);
+        return 1;
+    }
+
+
+七、为什么线程比纯 C 更抽象
+------------------------
+
+pthread_create 不是一个同名 Linux 内核系统调用。
+
+查看手册：
+
+    man 3 pthread_create
+    man 3 pthread_join
+    man 7 pthreads
+
+不是：
+
+    man 2 pthread_create
+
+
+原因：
+
+    pthread 是 POSIX 线程接口，
+    Linux 上通常通过 glibc / NPTL 等实现，
+    再配合内核线程机制工作。
+
+因此它不像：
+
+    open
+    read
+    fork
+    waitpid
+
+那样容易直接按“系统调用”理解。
+
+
+八、demo27 最重要的实验
+---------------------
+
+worker.c：
+
+    printf("worker：开始运行\n");
+
+    sleep(3);
+
+    printf("worker：准备退出\n");
+
+    return 1;
+
+
+父进程 work 线程：
+
+    printf("父进程新线程：work 开始\n");
+
+    sleep(1);
+
+    printf("父进程新线程：work 结束\n");
+
+
+父进程 main 线程：
+
+    pthread_create(...);
+
+    printf("父进程main：准备 waitpid\n");
+
+    waitpid(child, &status, 0);
+
+    printf("父进程main：waitpid 结束\n");
+
+
+实际运行结果：
+
+    父进程main：准备 waitpid
+    worker：开始运行
+    父进程新线程：work 开始
+    父进程新线程：work 结束
+    worker：准备退出
+    父进程main：waitpid 结束
+    worker 正常退出，退出码 = 1
+
+
+九、这个输出证明了什么
+--------------------
+
+当父进程 main 线程执行：
+
+    waitpid(child, &status, 0);
+
+以后：
+
+    父进程 main 线程
+    → 被阻塞
+    → 等待子进程结束
+
+
+但是父进程里的：
+
+    work 线程
+
+仍然可以继续执行。
+
+
+所以：
+
+    一条线程阻塞
+    ≠
+    整个进程停止
+
+
+这就是 demo27 最核心的线程现象。
+
+
+十、当时真正存在的三条执行流
+--------------------------
+
+运行过程中：
+
+1.
+
+    父进程 main 线程
+
+    当前：
+        waitpid 等待子进程
+
+
+2.
+
+    父进程 work 线程
+
+    当前：
+        正常运行自己的代码
+
+
+3.
+
+    子进程 worker
+
+    当前：
+        exec 后运行 worker.c
+
+
+也就是说：
+
+    同一时刻既有进程并发，
+    又有进程内部的线程并发。
+
+
+十一、pthread_join()
+-------------------
+
+最简单形式：
+
+    pthread_join(tid, NULL);
+
+
+作用：
+
+    当前线程等待 tid 指定的线程结束。
+
+
+可以先类比：
+
+    waitpid()
+    → 等子进程
+
+    pthread_join()
+    → 等线程
+
+
+注意：
+
+    pthread_join 不会杀死线程。
+
+它做的是：
+
+    等线程结束
+    + 对 joinable 线程完成必要的收尾
+
+
+十二、pthread_join() 的两种情况
+-----------------------------
+
+情况 1：
+
+    tid 线程已经结束
+
+执行：
+
+    pthread_join(tid, NULL);
+
+结果：
+
+    不需要等待
+    → 很快返回
+
+
+情况 2：
+
+    tid 线程还没有结束
+
+执行：
+
+    pthread_join(tid, NULL);
+
+结果：
+
+    当前调用 pthread_join 的线程被阻塞
+    → 等 tid 线程结束
+    → pthread_join 返回
+    → 当前线程继续执行
+
+
+最短记忆：
+
+    线程先结束
+    → join 基本立即返回
+
+    线程后结束
+    → join 阻塞等待
+
+
+十三、为什么第一次看不出 pthread_join
+----------------------------------
+
+当时：
+
+    work 线程
+    → sleep(1)
+    → 大约 1 秒结束
+
+worker 子进程：
+
+    sleep(3)
+    → 大约 3 秒结束
+
+
+父进程 main 线程先执行：
+
+    waitpid(child, ...)
+
+所以时间大概是：
+
+    0 秒
+    ├── main → waitpid
+    ├── work → 运行
+    └── worker → 运行
+
+    1 秒
+    └── work 线程已经结束
+
+    3 秒
+    ├── worker 结束
+    ├── waitpid 返回
+    └── main 执行 pthread_join
+
+
+但是到 3 秒时：
+
+    work 线程早已经结束
+
+所以：
+
+    pthread_join(tid, NULL)
+
+几乎立即成功返回。
+
+因此从屏幕输出上感觉不到等待。
+
+
+十四、pthread_join 返回值
+-----------------------
+
+典型写法：
+
+    ret = pthread_join(tid, NULL);
+
+    if (ret != 0)
+    {
+        printf("pthread_join failed\n");
+    }
+
+
+规则：
+
+    ret == 0
+    → pthread_join 调用成功
+
+    ret != 0
+    → pthread_join 调用失败
+
+
+必须注意：
+
+    ret == 0
+
+不表示：
+
+    “线程早就结束了”
+
+
+而是表示：
+
+    “pthread_join 这次调用成功完成了”
+
+
+无论线程是：
+
+    早就结束
+
+还是：
+
+    pthread_join 等了一会儿才结束
+
+最后成功 join：
+
+    ret 都是 0
+
+
+十五、如何观察 pthread_join 的阻塞
+--------------------------------
+
+可以改成：
+
+work 线程：
+
+    sleep(5);
+
+worker 子进程：
+
+    sleep(3);
+
+
+那么时间线：
+
+    0 秒
+    ├── main → waitpid
+    ├── work → 开始
+    └── worker → 开始
+
+    3 秒
+    ├── worker 结束
+    ├── waitpid 返回
+    └── main → pthread_join
+
+此时 work 还没结束：
+
+    main 线程
+    → 阻塞在 pthread_join
+
+    work 线程
+    → 继续运行
+
+    5 秒
+    ├── work 结束
+    └── pthread_join 返回
+
+
+这个实验可以直接证明：
+
+    waitpid
+    → 等进程
+
+    pthread_join
+    → 等线程
+
+
+十六、pthread_join 为什么能防止 main 提前结束
+-------------------------------------------
+
+假设：
+
+    work 线程还没结束
+
+但 main 线程直接：
+
+    return 0;
+
+那么：
+
+    整个进程结束
+    → 这个进程里的其他线程也结束
+
+
+所以在当前 demo 中：
+
+    pthread_join(tid, NULL);
+
+的实际效果就是：
+
+    如果 work 还没结束
+    → main 先别继续到 return 0
+    → 等 work 真正结束
+    → 再结束整个进程
+
+
+严格来说：
+
+    pthread_join 的本义是
+    “等待指定线程结束”
+
+不是专门：
+
+    “禁止 main 结束”
+
+只是当前代码里：
+
+    join 后面就是 main 的 return
+
+所以表现出来就是：
+
+    不让 main 提前把整个进程结束掉。
+
+
+十七、demo27 与 demo26 的关系
+----------------------------
+
+demo26：
+
+    fork
+    → exec worker
+    → waitpid
+    → status
+    → 判断子进程如何结束
+
+解决：
+
+    进程级管理
+
+
+demo27：
+
+    在 demo26 父进程内部增加：
+
+        pthread_create
+
+    再增加：
+
+        pthread_join
+
+
+解决：
+
+    同一个进程内部，
+    如何再增加并管理一条执行流
+
+
+所以最终结构：
+
+    进程层：
+
+        supervisor
+        └── worker 子进程
+
+    线程层：
+
+        supervisor
+        ├── main 主线程
+        └── work 线程
+
+
+十八、编译
+---------
+
+worker：
+
+    gcc -Wall -Wextra -std=c11 worker.c -o worker
+
+
+supervisor：
+
+    gcc -Wall -Wextra -std=c11 supervisor.c -o supervisor -pthread
+
+
+注意：
+
+    pthread 程序编译 / 链接时使用：
+
+        -pthread
+
+
+十九、demo27 当前已经掌握的内容
+----------------------------
+
+1.
+
+    一个进程至少有 main 线程。
+
+
+2.
+
+    pthread_create()
+    → 在当前进程内部创建新线程。
+
+
+3.
+
+    pthread_t tid
+    → 保存线程标识。
+
+
+4.
+
+    pthread_create 返回值
+    → 判断线程创建是否成功。
+
+
+5.
+
+    一条线程阻塞
+    → 其他线程仍然可以运行。
+
+
+6.
+
+    waitpid()
+    → 当前线程等待子进程。
+
+
+7.
+
+    pthread_join()
+    → 当前线程等待指定线程。
+
+
+8.
+
+    如果目标线程已经结束
+    → pthread_join 很快返回。
+
+
+9.
+
+    如果目标线程没结束
+    → pthread_join 阻塞调用它的线程。
+
+
+10.
+
+    pthread_join 返回 0
+    → 表示 join 调用成功，
+      不表示目标线程原本一定已经结束。
+
+
+二十、demo27 暂时不学的内容
+--------------------------
+
+当前没有继续加入：
+
+    pthread_create 第 4 参数传数据
+    pthread_join 第 2 参数接收线程返回值
+    多线程共享变量
+    竞态条件
+    mutex
+    condition variable
+    detach
+    cancel
+
+
+这些留到后续 demo。
+
+
+二十一、最短记忆版
+----------------
+
+    pthread_create()
+    → 创建线程
+
+    pthread_join()
+    → 等线程
+
+    waitpid()
+    → 等进程
+
+
+关键现象：
+
+    main 线程卡在 waitpid
+    ≠
+    整个父进程停止
+
+因为：
+
+    work 线程仍然可以继续执行
+
+
+demo27 一句话总结：
+
+    一个进程可以有多条线程；
+    一条线程阻塞时其他线程仍可运行；
+    pthread_create 创建线程，
+    pthread_join 等待线程结束。

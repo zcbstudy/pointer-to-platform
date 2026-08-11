@@ -1,0 +1,406 @@
+demo23：pipe + dup2 + exec 实现 ls | wc -l
+================================================
+
+一、学习目标
+------------
+
+本 Demo 实现 Shell 管线：
+
+    ls | wc -l
+
+两个独立程序承担不同职责：
+
+    ls      ：读取目录内容，生成目录列表
+    wc -l   ：读取目录列表，统计其中的换行数
+
+管道负责把：
+
+    ls 的标准输出
+            ↓
+         pipe
+            ↓
+    wc 的标准输入
+
+连接起来。
+
+
+二、pipe 创建了什么
+------------------
+
+函数原型：
+
+    #include <unistd.h>
+
+    int pipe(int fd[2]);
+
+调用：
+
+    int fd[2];
+    pipe(fd);
+
+pipe() 只调用一次，在内核中创建一条管道，并返回两个文件描述符：
+
+    fd[0]：管道读端
+    fd[1]：管道写端
+
+注意：
+
+    int fd[2];
+
+只有 fd[0] 和 fd[1]，不存在 fd[2]。
+
+pipe() 必须在 fork() 之前调用，这样后续创建的子进程才能继承同一条管道。
+
+
+三、一个管道，两个子进程
+----------------------
+
+整体结构：
+
+    父进程
+    │
+    ├── pipe(fd)            创建一次管道
+    │
+    ├── fork()              创建 ls 子进程
+    │     └── 使用管道写端
+    │
+    ├── fork()              创建 wc 子进程
+    │     └── 使用管道读端
+    │
+    ├── 关闭父进程中的 fd[0] 和 fd[1]
+    └── wait() 两次
+
+两次 fork() 创建的是两个子进程，不是两条管道。
+
+两个子进程继承的是同一个内核管道对象：
+
+    ls 子进程                     wc 子进程
+        │                            ▲
+        │ 写                         │ 读
+        ▼                            │
+      fd[1] ── 内核管道缓冲区 ── fd[0]
+
+
+四、dup2 的作用
+--------------
+
+函数原型：
+
+    #include <unistd.h>
+
+    int dup2(int oldfd, int newfd);
+
+作用：
+
+    让 newfd 指向 oldfd 当前指向的同一个内核对象。
+
+1. ls 子进程
+
+    dup2(fd[1], STDOUT_FILENO);
+
+含义：
+
+    标准输出 fd 1 → 管道写端
+
+执行前：
+
+    fd 1   → 终端
+    fd[1]  → 管道写端
+
+执行后：
+
+    fd 1   → 管道写端
+    fd[1]  → 管道写端
+
+此后 ls 仍然只向自己的标准输出 fd 1 写数据，
+但 fd 1 已经被接到了管道写端。
+
+2. wc 子进程
+
+    dup2(fd[0], STDIN_FILENO);
+
+含义：
+
+    标准输入 fd 0 → 管道读端
+
+执行前：
+
+    fd 0   → 终端输入
+    fd[0]  → 管道读端
+
+执行后：
+
+    fd 0   → 管道读端
+    fd[0]  → 管道读端
+
+此后 wc 仍然只从自己的标准输入 fd 0 读取，
+但 fd 0 已经被接到了管道读端。
+
+
+五、为什么 dup2 后还要 close
+---------------------------
+
+ls 子进程：
+
+    close(fd[0]);                       // 不读
+    dup2(fd[1], STDOUT_FILENO);         // 标准输出接到管道写端
+    close(fd[1]);                       // 关闭重复描述符
+
+dup2() 后，fd 1 和 fd[1] 都指向管道写端。
+
+关闭 fd[1] 不会让管道写端消失，因为 fd 1 仍然指向它。
+
+wc 子进程同理：
+
+    close(fd[1]);                       // 不写
+    dup2(fd[0], STDIN_FILENO);          // 标准输入接到管道读端
+    close(fd[0]);                       // 关闭重复描述符
+
+
+六、exec 在这里做什么
+-------------------
+
+exec 不创建新进程。
+
+它会把当前子进程正在运行的程序替换成另一个程序：
+
+    子进程执行 exec 前：运行自己的 main
+    子进程执行 exec 后：运行 ls 或 wc
+
+PID 不变，已经设置好的文件描述符关系会被新程序继承。
+
+因此顺序必须是：
+
+    先 dup2()
+    再 exec()
+
+ls 子进程：
+
+    dup2(fd[1], STDOUT_FILENO);
+    execl("/bin/ls", "ls", (char *)NULL);
+
+wc 子进程：
+
+    dup2(fd[0], STDIN_FILENO);
+    execl("/usr/bin/wc", "wc", "-l", (char *)NULL);
+
+exec 成功后不会返回。
+
+所以 exec 后面的代码只用于处理失败：
+
+    execl(...);
+
+    perror("execl");
+    return 1;
+
+
+七、程序里为什么没有显式 write 和 read
+-------------------------------------
+
+在我们编写的连接程序中，没有亲手调用：
+
+    write(...)
+    read(...)
+
+因为真正的数据读写由 ls 和 wc 内部完成。
+
+可以把它们的行为近似理解为：
+
+    ls 内部：
+        write(STDOUT_FILENO, 目录列表, 数据长度);
+
+    wc 内部：
+        while (read(STDIN_FILENO, buf, sizeof(buf)) > 0)
+        {
+            统计换行符;
+        }
+
+我们的程序只负责：
+
+    1. 创建管道
+    2. 创建两个子进程
+    3. 修改标准输入、标准输出的指向
+    4. exec 两个现成程序
+    5. 回收两个子进程
+
+准确的数据流：
+
+    ls 读取目录
+        ↓
+    ls 生成目录列表
+        ↓
+    ls 向标准输出 fd 1 写
+        ↓
+    pipe
+        ↓
+    wc 从标准输入 fd 0 读
+        ↓
+    wc 统计换行数
+        ↓
+    wc 把统计结果输出到终端
+
+注意：
+
+    wc -l 的最终数字是统计出来的结果，
+    不是从管道中直接“写入得到的”。
+
+
+八、本 Demo 的准确名称
+--------------------
+
+从数据流角度，ls 产生数据，wc 读取并处理数据。
+
+但本 Demo 的核心不是手写经典生产者—消费者同步问题，
+也没有自己实现：
+
+    共享数组
+    mutex
+    empty/full 信号量
+    条件变量
+
+因此笔记中准确名称写：
+
+    Unix 管道：连接两个独立程序的标准输出与标准输入
+
+不要把本 Demo 直接命名为：
+
+    生产者—消费者模型
+
+
+九、为什么父进程必须关闭管道两端
+------------------------------
+
+父进程创建完两个子进程后：
+
+    close(fd[0]);
+    close(fd[1]);
+
+父进程自己既不读，也不写，所以两端都要关闭。
+
+尤其是 fd[1]：
+
+如果父进程一直保留管道写端，即使 ls 已经结束，
+wc 仍然会认为“可能还有进程继续写数据”，因此可能一直等不到 EOF。
+
+只有所有写端都关闭后：
+
+    read(...) 返回 0
+
+wc 才知道管道数据已经结束。
+
+
+十、完整参考代码
+---------------
+
+    #include <unistd.h>
+    #include <sys/wait.h>
+    #include <stdio.h>
+
+    int main(void)
+    {
+        int fd[2];
+        pid_t ls_pid;
+        pid_t wc_pid;
+
+        if (pipe(fd) < 0)
+        {
+            perror("pipe");
+            return 1;
+        }
+
+        ls_pid = fork();
+
+        if (ls_pid < 0)
+        {
+            perror("fork ls");
+            close(fd[0]);
+            close(fd[1]);
+            return 1;
+        }
+        else if (ls_pid == 0)
+        {
+            close(fd[0]);
+
+            if (dup2(fd[1], STDOUT_FILENO) < 0)
+            {
+                perror("dup2 ls");
+                return 1;
+            }
+
+            close(fd[1]);
+
+            execl("/bin/ls", "ls", (char *)NULL);
+
+            perror("execl ls");
+            return 1;
+        }
+
+        wc_pid = fork();
+
+        if (wc_pid < 0)
+        {
+            perror("fork wc");
+            close(fd[0]);
+            close(fd[1]);
+            wait(NULL);
+            return 1;
+        }
+        else if (wc_pid == 0)
+        {
+            close(fd[1]);
+
+            if (dup2(fd[0], STDIN_FILENO) < 0)
+            {
+                perror("dup2 wc");
+                return 1;
+            }
+
+            close(fd[0]);
+
+            execl("/usr/bin/wc", "wc", "-l", (char *)NULL);
+
+            perror("execl wc");
+            return 1;
+        }
+
+        close(fd[0]);
+        close(fd[1]);
+
+        wait(NULL);
+        wait(NULL);
+
+        return 0;
+    }
+
+
+十一、编译与运行
+---------------
+
+编译：
+
+    gcc -Wall -Wextra -std=c11 main.c -o demo23
+
+运行：
+
+    ./demo23
+
+Shell 对照命令：
+
+    ls | wc -l
+
+两个结果应当一致。
+
+
+十二、核心结论
+-------------
+
+1. pipe() 只创建一次管道。
+2. fd[0] 是读端，fd[1] 是写端。
+3. 两次 fork() 创建两个子进程，但它们继承同一条管道。
+4. ls 子进程把标准输出重定向到管道写端。
+5. wc 子进程把标准输入重定向到管道读端。
+6. dup2() 负责接线，不负责传输数据。
+7. exec() 把当前子进程替换成 ls 或 wc，PID 不变。
+8. ls 负责生成目录列表，wc -l 负责读取并统计。
+9. 实际 read/write 被封装在 ls 和 wc 内部。
+10. 父进程必须关闭自己的管道两端，否则 wc 可能等不到 EOF。
