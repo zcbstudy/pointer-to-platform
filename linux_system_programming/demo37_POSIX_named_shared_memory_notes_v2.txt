@@ -1,0 +1,1078 @@
+demo37：POSIX 命名共享内存
+
+========================================
+一、这一节解决什么问题
+========================================
+
+demo36：
+
+    mmap(..., MAP_SHARED | MAP_ANONYMOUS, -1, 0)
+    ↓
+    先 mmap
+    ↓
+    再 fork
+    ↓
+    父子进程继承同一个共享 mapping
+
+这种方式适合：
+    父进程和子进程之间共享内存。
+
+
+demo37：
+
+    ./writer
+    ./reader
+
+两个程序是分别启动的，
+没有 fork 继承关系。
+
+问题：
+
+    writer 创建的共享内存，
+    reader 怎么找到？
+
+解决办法：
+
+    给共享内存对象一个名字。
+
+例如：
+
+    "/demo37_shm"
+
+两个进程都通过：
+
+    shm_open("/demo37_shm", ...)
+
+找到同一个 POSIX 共享内存对象。
+
+
+========================================
+二、共享的不是“同一个虚拟地址”
+========================================
+
+共享内存并不要求：
+
+    A 进程中的指针地址
+    ==
+    B 进程中的指针地址
+
+例如：
+
+进程 A：
+
+    虚拟地址 0x7000
+          ↓
+       A 的页表
+          ↓
+      共享物理页 X
+
+进程 B：
+
+    虚拟地址 0xA000
+          ↓
+       B 的页表
+          ↓
+      共享物理页 X
+
+所以：
+
+    A 的虚拟地址可以是 0x7000
+    B 的虚拟地址可以是 0xA000
+
+虽然虚拟地址不同，
+但最后可以映射到同一个底层共享页。
+
+因此：
+
+    “共享内存”
+    ≠
+    “两个进程指针数值必须一样”
+
+真正决定共享的是：
+
+    两个 mapping 是否最终指向同一个共享对象。
+
+
+========================================
+三、匿名共享内存和命名共享内存
+========================================
+
+demo36：
+
+    MAP_SHARED | MAP_ANONYMOUS
+
+含义：
+
+    MAP_SHARED
+    → 修改是共享的
+
+    MAP_ANONYMOUS
+    → 没有文件/命名共享对象作为 backing
+
+典型方式：
+
+    mmap
+    ↓
+    fork
+    ↓
+    子进程继承 mapping
+
+
+demo37：
+
+    shm_open("/demo37_shm", ...)
+    ↓
+    得到 fd
+    ↓
+    mmap(..., MAP_SHARED, fd, 0)
+
+这里不是 MAP_ANONYMOUS。
+
+因为已经有：
+
+    "/demo37_shm"
+    ↓
+    POSIX 命名共享内存对象
+    ↓
+    fd
+
+
+注意：
+
+    mmap(NULL, ...)
+
+这里的 NULL 只是：
+
+    不指定映射到哪个虚拟地址，
+    让内核选择。
+
+它不代表匿名。
+
+真正的匿名映射标志是：
+
+    MAP_ANONYMOUS
+
+
+========================================
+四、shm_open()
+========================================
+
+典型写法：
+
+    int fd = shm_open(
+        "/demo37_shm",
+        O_CREAT | O_RDWR,
+        0666
+    );
+
+作用：
+
+    创建 / 打开名字为
+    "/demo37_shm"
+    的 POSIX 共享内存对象。
+
+成功：
+
+    返回 fd
+
+失败：
+
+    返回 -1
+    并设置 errno
+
+
+参数 1：
+
+    "/demo37_shm"
+
+这是：
+
+    共享内存对象的名字
+
+不是：
+
+    虚拟地址
+    指针
+    普通 mmap 地址
+
+
+参数 2：
+
+    O_CREAT | O_RDWR
+
+O_CREAT：
+
+    如果不存在就创建
+
+O_RDWR：
+
+    以可读 + 可写方式打开
+
+
+参数 3：
+
+    0666
+
+最前面的 0：
+
+    表示这个整数使用八进制写法。
+
+权限基本值：
+
+    4 = read
+    2 = write
+    1 = execute
+
+所以：
+
+    6 = 4 + 2
+      = rw-
+
+因此：
+
+    0666
+    = rw-rw-rw-
+
+分别对应：
+
+    owner
+    group
+    other
+
+实际权限还会受到 umask 影响。
+
+
+========================================
+五、ftruncate()
+========================================
+
+典型：
+
+    ftruncate(fd, sizeof(int));
+
+作用：
+
+    把 fd 对应共享内存对象的
+    “逻辑长度”
+    设置成 sizeof(int)。
+
+假设：
+
+    sizeof(int) == 4
+
+那么：
+
+    "/demo37_shm"
+    的逻辑长度 = 4 字节
+
+
+如果需要 10 个 int：
+
+    ftruncate(fd, 10 * sizeof(int));
+
+
+重要：
+
+ftruncate 不是：
+
+    “直接把一个 int 的物理 RAM 给 fd”
+
+更准确的是：
+
+    设置 fd 对应对象的逻辑长度。
+
+
+----------------------------------------
+ftruncate() 的返回值
+----------------------------------------
+
+成功：
+
+    0
+
+失败：
+
+    -1
+
+它不会返回：
+
+    设置了多少字节
+
+所以：
+
+    if (ftruncate(fd, sizeof(int)) == -1)
+    {
+        perror("ftruncate");
+    }
+
+是正确写法。
+
+
+和 read/write 不一样：
+
+read():
+
+    成功 → 返回实际读到的字节数
+    文件结束 → 0
+    失败 → -1
+
+write():
+
+    成功 → 返回实际写入字节数
+    失败 → -1
+
+ftruncate():
+
+    成功 → 0
+    失败 → -1
+
+
+========================================
+六、mmap()
+========================================
+
+demo37：
+
+    int *shared = mmap(
+        NULL,
+        sizeof(int),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+
+参数解释：
+
+NULL：
+
+    不指定虚拟地址，
+    让内核选择。
+
+sizeof(int)：
+
+    映射长度。
+
+PROT_READ | PROT_WRITE：
+
+    当前进程允许通过 mapping
+    读取和修改。
+
+MAP_SHARED：
+
+    对 mapping 的修改属于共享修改。
+
+fd：
+
+    shm_open() 返回的
+    共享内存对象 fd。
+
+0：
+
+    从共享对象偏移 0
+    开始映射。
+
+
+========================================
+七、MAP_SHARED 和 MAP_PRIVATE
+========================================
+
+MAP_SHARED：
+
+    A 写
+    ↓
+    共享对象被修改
+    ↓
+    B 映射同一个对象
+    ↓
+    B 可以看到 A 的修改
+
+
+MAP_PRIVATE：
+
+    A 写
+    ↓
+    COW（写时复制）
+    ↓
+    A 的修改成为私有修改
+    ↓
+    不作为共享修改让 B 看到
+
+
+所以：
+
+    如果 A 修改后希望 B 能看到
+    → MAP_SHARED
+
+    如果 A 修改只想自己看到
+    → MAP_PRIVATE
+
+
+========================================
+八、通过指针读写
+========================================
+
+假设：
+
+    int *shared = mmap(...);
+
+writer：
+
+    *shared = 100;
+
+表示：
+
+    通过 writer 自己的虚拟地址 shared，
+    向共享对象中写入整数 100。
+
+
+reader：
+
+    shm_open("/demo37_shm", ...)
+    ↓
+    mmap(...)
+    ↓
+    *shared
+
+就可以读取这个值。
+
+
+========================================
+九、多个 int 和 n 的问题
+========================================
+
+如果：
+
+    ftruncate(fd, sizeof(int));
+
+并且：
+
+    mmap(..., sizeof(int), ...);
+
+那么只给了一个 int 的空间。
+
+安全访问：
+
+    shared[0]
+
+不能安全访问：
+
+    shared[1]
+    shared[2]
+
+因为越界。
+
+
+如果要 10 个 int：
+
+    int n = 10;
+
+    ftruncate(fd, n * sizeof(int));
+
+    int *shared = mmap(
+        NULL,
+        n * sizeof(int),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+合法下标：
+
+    shared[0]
+    ...
+    shared[9]
+
+注意：
+
+    n = 10
+
+最后一个下标：
+
+    n - 1
+    = 9
+
+但是内存长度仍然是：
+
+    n * sizeof(int)
+
+不是：
+
+    (n - 1) * sizeof(int)
+
+
+因为：
+
+    下标范围是 0 ~ n-1
+
+但元素数量仍然是 n 个。
+
+
+========================================
+十、提前知道输入数量 n
+========================================
+
+如果程序一开始就知道：
+
+    n = 输入的数据个数
+
+那么可以一次性：
+
+    ftruncate(fd, n * sizeof(int));
+
+然后：
+
+    mmap(..., n * sizeof(int), ...);
+
+再循环：
+
+    for (int i = 0; i < n; i++)
+    {
+        scanf("%d", &shared[i]);
+    }
+
+这种方式最简单。
+
+因为：
+
+    n 已经提前知道
+    ↓
+    直接确定总空间大小
+    ↓
+    不需要动态扩容
+
+
+========================================
+十一、munmap()
+========================================
+
+典型：
+
+    munmap(shared, sizeof(int));
+
+作用：
+
+    解除当前进程从 shared 开始的
+    一段 mmap 映射。
+
+
+第二个参数不是：
+
+    最后一个数组下标
+
+而是：
+
+    要解除映射的“字节长度”。
+
+
+例如：
+
+前面：
+
+    mmap(..., sizeof(int), ...);
+
+后面：
+
+    munmap(shared, sizeof(int));
+
+
+如果前面：
+
+    mmap(..., 10 * sizeof(int), ...);
+
+后面应该：
+
+    munmap(shared, 10 * sizeof(int));
+
+
+不是：
+
+    munmap(shared, 9 * sizeof(int));
+
+
+因为：
+
+    10 个元素
+    下标虽然是 0 ~ 9
+
+但总长度仍然是：
+
+    10 * sizeof(int)
+
+
+========================================
+十二、close(fd)
+========================================
+
+    close(fd);
+
+作用：
+
+    当前进程关闭自己的 fd。
+
+
+注意：
+
+    close(fd)
+    ≠
+    munmap()
+
+mmap 成功以后：
+
+    fd
+    和
+    mapping
+
+是两个不同的资源关系。
+
+关闭 fd：
+
+    不等于自动解除 mapping。
+
+
+========================================
+十三、shm_unlink()
+========================================
+
+    shm_unlink("/demo37_shm");
+
+作用：
+
+    删除 POSIX 共享内存对象的“名字入口”。
+
+
+原来：
+
+    "/demo37_shm"
+          ↓
+    共享内存对象
+
+
+shm_unlink 后：
+
+    "/demo37_shm" 这个名字没了。
+
+新的进程以后不能再通过这个名字
+打开原来的对象。
+
+
+注意：
+
+    shm_unlink()
+    ≠
+    munmap()
+
+
+区别：
+
+munmap():
+
+    当前进程解除自己的 mapping
+
+close(fd):
+
+    当前进程关闭自己的 fd
+
+shm_unlink():
+
+    删除共享内存对象的公共名字
+
+
+如果某个进程已经 mmap 过，
+那么执行 shm_unlink 后：
+
+    已经存在的 mapping
+    不会立刻失效。
+
+
+最终：
+
+    名字已经 shm_unlink
+    +
+    所有 fd 都关闭
+    +
+    所有 mapping 都解除
+
+共享对象才最终被系统回收。
+
+
+========================================
+十四、为什么 writer 不立即 shm_unlink
+========================================
+
+这个 demo 是：
+
+    ./writer
+    ./reader
+
+两个独立程序。
+
+
+writer：
+
+    创建共享对象
+    ↓
+    写入 100
+    ↓
+    munmap
+    ↓
+    close
+    ↓
+    退出
+
+
+但是：
+
+    不 shm_unlink
+
+
+原因：
+
+reader 之后还需要：
+
+    shm_open("/demo37_shm", ...)
+
+通过这个名字找到原来的共享对象。
+
+
+如果 writer 最后：
+
+    shm_unlink("/demo37_shm");
+
+并且 writer 已经：
+
+    munmap
+    close
+
+那么没有其他引用以后，
+对象会被回收。
+
+之后 reader 就找不到原来的对象。
+
+
+========================================
+十五、writer.c 完整代码
+========================================
+
+#include <stdio.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+int main(void)
+{
+    int fd = shm_open(
+        "/demo37_shm",
+        O_CREAT | O_RDWR,
+        0666
+    );
+
+    if (fd == -1)
+    {
+        perror("shm_open");
+        return 1;
+    }
+
+    if (ftruncate(fd, sizeof(int)) == -1)
+    {
+        perror("ftruncate");
+        close(fd);
+        return 1;
+    }
+
+    int *shared = mmap(
+        NULL,
+        sizeof(int),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+    if (shared == MAP_FAILED)
+    {
+        perror("mmap");
+        close(fd);
+        return 1;
+    }
+
+    *shared = 100;
+
+    printf("writer: %d\n", *shared);
+
+    if (munmap(shared, sizeof(int)) == -1)
+    {
+        perror("munmap");
+        close(fd);
+        return 1;
+    }
+
+    close(fd);
+
+    /*
+     * 这里故意不 shm_unlink。
+     * reader 后面还要通过名字找到这个共享对象。
+     */
+
+    return 0;
+}
+
+
+writer 执行链：
+
+    shm_open
+    ↓
+    ftruncate
+    ↓
+    mmap
+    ↓
+    *shared = 100
+    ↓
+    munmap
+    ↓
+    close
+    ↓
+    不 shm_unlink
+
+
+========================================
+十六、reader.c 完整代码
+========================================
+
+#include <stdio.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+int main(void)
+{
+    int fd = shm_open(
+        "/demo37_shm",
+        O_RDONLY,
+        0
+    );
+
+    if (fd == -1)
+    {
+        perror("shm_open");
+        return 1;
+    }
+
+    int *shared = mmap(
+        NULL,
+        sizeof(int),
+        PROT_READ,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+    if (shared == MAP_FAILED)
+    {
+        perror("mmap");
+        close(fd);
+        return 1;
+    }
+
+    printf("reader: %d\n", *shared);
+
+    if (munmap(shared, sizeof(int)) == -1)
+    {
+        perror("munmap");
+        close(fd);
+        return 1;
+    }
+
+    close(fd);
+
+    if (shm_unlink("/demo37_shm") == -1)
+    {
+        perror("shm_unlink");
+        return 1;
+    }
+
+    return 0;
+}
+
+
+reader 执行链：
+
+    shm_open
+    ↓
+    打开已有共享对象
+    ↓
+    mmap
+    ↓
+    *shared
+    ↓
+    读到 100
+    ↓
+    munmap
+    ↓
+    close
+    ↓
+    shm_unlink
+
+
+========================================
+十七、reader 为什么没有 ftruncate
+========================================
+
+writer 已经：
+
+    创建共享对象
+    ↓
+    ftruncate(fd, sizeof(int))
+
+所以对象大小已经确定。
+
+reader 的任务只是：
+
+    打开
+    ↓
+    映射
+    ↓
+    读取
+
+不需要再调整对象大小。
+
+
+========================================
+十八、reader 为什么 shm_open 第三个参数写 0
+========================================
+
+reader：
+
+    shm_open(
+        "/demo37_shm",
+        O_RDONLY,
+        0
+    );
+
+因为 reader 没有：
+
+    O_CREAT
+
+它只是打开一个已经存在的对象。
+
+mode 参数只有在创建对象时才有实际意义。
+
+所以这里写：
+
+    0
+
+即可。
+
+
+========================================
+十九、编译和运行
+========================================
+
+编译：
+
+    gcc writer.c -o writer
+    gcc reader.c -o reader
+
+
+运行：
+
+    ./writer
+
+预期：
+
+    writer: 100
+
+
+然后：
+
+    ./reader
+
+预期：
+
+    reader: 100
+
+
+运行顺序：
+
+    writer
+    ↓
+    创建共享对象
+    ↓
+    写 100
+    ↓
+    writer 退出但不 unlink
+    ↓
+    reader
+    ↓
+    打开同一共享对象
+    ↓
+    读 100
+    ↓
+    shm_unlink 清理
+
+
+========================================
+二十、本节新增 API
+========================================
+
+1. shm_open()
+
+    创建 / 打开
+    POSIX 命名共享内存对象。
+
+
+2. ftruncate()
+
+    调整 fd 对应对象的逻辑长度。
+
+    成功返回 0
+    失败返回 -1
+
+
+3. shm_unlink()
+
+    删除 POSIX 共享内存对象的名字。
+
+
+继续使用的旧 API：
+
+    mmap()
+    munmap()
+    close()
+    perror()
+
+
+========================================
+二十一、最重要的四句话
+========================================
+
+1.
+
+    demo36：
+    匿名共享 mmap + fork 继承
+
+
+2.
+
+    demo37：
+    shm_open 按名字找到共享对象
+
+
+3.
+
+    共享内存共享的是底层共享对象/共享页，
+    不是要求两个进程虚拟地址完全相同。
+
+
+4.
+
+    mmap 多长
+    munmap 就解除相应长度。
+
+    n 个 int：
+        长度 = n * sizeof(int)
+
+    虽然最后一个下标是：
+        n - 1

@@ -1,0 +1,361 @@
+﻿demo36_mmap_anonymous_shared_memory_notes
+RoadToEmbedded - Linux第一轮
+主题：MAP_SHARED | MAP_ANONYMOUS / fork / 父子进程共享内存
+
+一、核心机制
+
+普通变量 + fork：
+父子进程拥有各自虚拟地址空间。
+子进程修改普通变量，不会直接让父进程同名变量一起改变。
+
+匿名共享mmap：
+
+先mmap
+-> 建立匿名共享mapping
+-> 再fork
+-> 子进程继承这段mapping
+-> 父子各自虚拟地址空间中的mapping指向同一组共享内存页
+-> 一方修改，另一方可以看到
+
+
+二、MAP_ANONYMOUS和MAP_SHARED
+
+MAP_ANONYMOUS：
+表示这次mmap背后没有普通文件。
+
+MAP_SHARED：
+表示修改是共享的。
+
+一定区分：
+
+MAP_ANONYMOUS
+= 有没有普通文件
+
+MAP_SHARED / MAP_PRIVATE
+= 修改是不是共享
+
+
+三、匿名mmap参数
+
+int *shared = mmap(
+    NULL,
+    sizeof(int),
+    PROT_READ | PROT_WRITE,
+    MAP_SHARED | MAP_ANONYMOUS,
+    -1,
+    0
+);
+
+NULL
+-> 地址让内核选
+
+sizeof(int)
+-> 这次只需要一块能容纳一个int的映射区域
+
+PROT_READ | PROT_WRITE
+-> 可以读写
+
+MAP_SHARED
+-> 修改共享
+
+MAP_ANONYMOUS
+-> 没有普通文件
+
+-1
+-> 没有文件fd
+
+0
+-> 没有文件，也没有文件offset的实际意义
+
+
+四、shared是什么
+
+int *shared;
+
+mmap成功后：
+shared保存匿名共享映射区域的起始虚拟地址。
+
+*shared
+表示：
+把shared指向的位置按照一个int对象来访问。
+
+
+五、sizeof(int)与指针类型
+
+假设：
+sizeof(int) == 4
+
+mmap(..., sizeof(int), ...)
+表示映射区域长度4字节。
+
+int *shared
+表示程序按int解释这块内存。
+
+*shared = 10;
+表示把整数10按int的存储形式写入这一个int对象占用的字节。
+
+不是字符串"10"，
+也不是每一个字节都等于10。
+
+
+六、char*与int*
+
+char *p：
+p[0]是第一个char，通常1字节。
+p[1]是第二个char。
+
+int *p：
+假设sizeof(int)==4：
+
+p[0] -> 第一个int -> 字节0~3
+p[1] -> 第二个int -> 字节4~7
+
+所以：
+p[0]不是“第0个字节”，而是“第一个int”。
+
+
+七、如果mmap 8字节，指针是int*
+
+假设sizeof(int)==4：
+
+8字节可以容纳两个int。
+
+p[0] = 10;
+p[1] = 20;
+
+布局：
+
+字节0~3 -> 第一个int 10
+字节4~7 -> 第二个int 20
+
+不会变成1020。
+10和20是两个独立的整数对象，不是字符串拼接。
+
+
+八、整数和字符串不要混
+
+int x = 10;
+int y = 1000000;
+
+只要都在int范围内，
+如果当前平台sizeof(int)==4，
+它们都占4字节。
+
+数字越大不会让int自动扩容。
+
+字符串：
+
+"10"
+= '1' '0' '\0'
+
+"1000000"
+= 7个字符 + '\0'
+
+整数值和字符串文本是不同的数据表示。
+
+
+九、如果数字超过int范围
+
+假设int是32bit，
+有符号int常见范围约：
+
+-2147483648 ~ 2147483647
+
+如果数值超过范围，
+int不会自动从4字节变8字节，
+必须换更大的类型，例如long long，并用sizeof确认大小。
+
+
+十、为什么先mmap再fork
+
+正确：
+
+mmap()
+-> 建立共享mapping
+-> fork()
+-> 子进程继承父进程已有mapping
+
+父子虚拟地址空间仍然独立，
+只是相关mapping指向同一组共享页。
+
+
+十一、共享初始值
+
+fork之前：
+
+*shared = 10;
+
+表示在匿名共享区域中放入一个int初始值10。
+
+fork后：
+父子都能通过shared访问这块共享区域。
+
+
+十二、fork返回值
+
+pid == -1
+-> fork失败
+
+pid == 0
+-> 当前是子进程
+
+pid > 0
+-> 当前是父进程
+
+
+十三、子进程修改
+
+子进程：
+
+*shared = 100;
+
+因为是MAP_SHARED，
+父进程之后读取*shared可以看到100。
+
+
+十四、wait(NULL)
+
+父进程：
+
+wait(NULL);
+
+作用1：
+等待并回收子进程。
+
+作用2：
+当前demo里保证顺序：
+子先写100
+-> 子结束
+-> 父wait返回
+-> 父再读取
+
+所以父能稳定看到100。
+
+NULL表示：
+不关心子进程具体退出状态。
+
+如果需要退出状态：
+
+int status;
+wait(&status);
+
+然后可以使用：
+WIFEXITED(status)
+WEXITSTATUS(status)
+
+
+十五、父子各自munmap
+
+子进程：
+munmap(shared, sizeof(int));
+
+只解除子进程自己虚拟地址空间中的mapping。
+
+不会把父进程的mapping一起解除。
+
+父进程最后也应该munmap。
+
+
+十六、demo36完整代码
+
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+
+int main(void)
+{
+    int *shared;
+    pid_t pid;
+
+    shared = mmap(
+        NULL,
+        sizeof(int),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS,
+        -1,
+        0
+    );
+
+    if (shared == MAP_FAILED)
+    {
+        perror("mmap");
+        return 1;
+    }
+
+    *shared = 10;
+
+    pid = fork();
+
+    if (pid == -1)
+    {
+        perror("fork");
+        munmap(shared, sizeof(int));
+        return 1;
+    }
+
+    if (pid == 0)
+    {
+        printf("child: before = %d\n", *shared);
+
+        *shared = 100;
+
+        printf("child: after  = %d\n", *shared);
+
+        munmap(shared, sizeof(int));
+        return 0;
+    }
+    else
+    {
+        wait(NULL);
+
+        printf("parent: shared = %d\n", *shared);
+
+        munmap(shared, sizeof(int));
+    }
+
+    return 0;
+}
+
+
+十七、demo35与demo36对比
+
+demo35：
+文件mmap
+
+文件
+-> fd
+-> mmap
+-> 当前进程虚拟地址
+
+demo36：
+匿名共享mmap
+
+没有普通文件
+-> MAP_ANONYMOUS
+-> mmap
+-> fork
+-> 父子共享mapping
+
+文件mmap：
+fd = 真文件描述符
+offset = 文件偏移
+
+匿名mmap：
+fd = -1
+offset = 0
+
+
+十八、demo36第一轮验收
+
+1. 知道MAP_ANONYMOUS
+2. 知道MAP_SHARED
+3. 知道为什么先mmap再fork
+4. 知道为什么fd=-1
+5. 知道为什么offset=0
+6. 知道sizeof(int)和int*分别负责什么
+7. 知道*shared=10到底写了什么
+8. 知道int*的p[0]/p[1]不是按字节走
+9. 知道子写100为什么父能看到
+10. 知道wait(NULL)
+11. 知道父子各自munmap

@@ -1,0 +1,630 @@
+demo33 - pthread 线程取消与 cleanup 笔记
+==========================================
+
+一、demo33 主线
+---------------
+
+pthread_cancel()
+    ↓
+cancellation request（取消请求）
+    ↓
+pending（有待处理请求）
+    ↓
+cancel state：ENABLE / DISABLE
+    ↓
+cancel type：DEFERRED / ASYNCHRONOUS
+    ↓
+cancellation point
+    ↓
+pthread_testcancel()
+    ↓
+cleanup handlers
+    ↓
+free / close / unlock / 归还资源
+    ↓
+线程结束
+
+
+二、pthread_cancel()
+-------------------
+
+pthread_cancel(tid)
+= 向目标线程提交 cancellation request。
+
+重点：
+不是“立刻 kill”。
+
+目标线程什么时候真正响应，还要看：
+1. cancel state
+2. cancel type
+3. 是否到达 cancellation point
+
+
+三、cancel state
+---------------
+
+PTHREAD_CANCEL_ENABLE
+    允许处理 cancellation request。
+
+PTHREAD_CANCEL_DISABLE
+    暂时不处理 cancellation request。
+    请求可以保持 pending。
+
+注意：
+DISABLE 不是把线程挂起。
+线程仍然正常运行。
+
+
+四、cancel type
+--------------
+
+PTHREAD_CANCEL_DEFERRED
+    延迟取消。
+    在 cancellation point 响应 pending request。
+    新线程默认就是这种模式。
+
+PTHREAD_CANCEL_ASYNCHRONOUS
+    异步取消。
+    不要求等 cancellation point。
+    可能在几乎任意时刻响应。
+    很容易破坏资源和共享状态的一致性。
+
+
+五、pending
+-----------
+
+为了理解，可以脑补：
+
+cancel_pending = 0
+    当前没有待处理的取消请求。
+
+cancel_pending = 1
+    已经有人要求这个线程取消，
+    但请求尚未完成处理。
+
+注意：
+这只是帮助理解的模型。
+不代表 glibc 内部真实源码一定存在一个同名 int 变量。
+
+
+六、pthread_testcancel()
+-----------------------
+
+pthread_testcancel()
+= 主动设置一个 cancellation point。
+
+在 ENABLE + DEFERRED 下：
+
+没有 pending request
+    ↓
+pthread_testcancel() 没有效果
+    ↓
+正常返回
+    ↓
+继续执行
+
+有 pending request
+    ↓
+pthread_testcancel()
+    ↓
+在这里响应取消
+    ↓
+不会正常返回到下一句
+    ↓
+进入 cancellation cleanup 流程
+    ↓
+线程最终结束
+
+所以它不是“每次调用就退出”。
+
+可以理解成：
+“这里是我明确选择的安全取消检查点。”
+
+
+七、pthread_cleanup_push / pop
+-----------------------------
+
+1. push
+
+pthread_cleanup_push(cleanup_worker, ctx);
+
+含义：
+登记一条 cleanup handler：
+
+    函数：cleanup_worker
+    参数：ctx
+
+可以理解成：
+
+“如果以后进入 cancellation cleanup，
+ 请调用 cleanup_worker(ctx)。”
+
+push 本身不会执行 cleanup。
+
+
+2. cancel 路径
+
+B 真正响应 pthread_cancel：
+    ↓
+不会继续执行到后面的 pthread_cleanup_pop()
+    ↓
+pthread cancellation 机制自动处理仍登记着的 cleanup handlers
+    ↓
+按 LIFO（后进先出）执行
+    ↓
+线程结束
+
+所以 cancel 路径不需要手动跑到 pop(1)。
+
+
+3. 正常路径
+
+pthread_cleanup_pop(1);
+
+= 弹出最上面的 cleanup handler
+  +
+  立即执行它
+
+pthread_cleanup_pop(0);
+
+= 弹出最上面的 handler
+  +
+  当前不执行它
+
+
+4. 容易混淆的一点
+
+pop(1) 里的 “1”
+不是 push 时登记进去的“一个 cleanup”。
+
+push 登记的是：
+
+    handler + arg
+
+例如：
+
+    cleanup_worker + ctx
+
+pop(1) 的 1 只是 execute 参数：
+
+    1 = 弹出并执行
+    0 = 弹出但不执行
+
+
+八、cleanup 不是线程
+-------------------
+
+cleanup_worker() 是普通函数，不是新的线程。
+
+B 被取消后：
+
+B 原来的业务路径停止
+    ↓
+仍然在 B 自己的线程执行上下文中
+    ↓
+执行 cleanup handler
+    ↓
+cleanup 完成
+    ↓
+B 最终结束
+
+但进程中的其他线程仍然可能同时运行。
+
+所以 cleanup 处理共享资源时，
+仍然必须考虑 mutex、ownership、资源生命周期和执行顺序。
+
+
+九、cleanup 不只是 free()
+------------------------
+
+cleanup 做什么，取决于 B 拿了什么资源。
+
+malloc()
+    → free()
+
+open()
+    → close()
+
+pthread_mutex_lock()
+    → 必要时 pthread_mutex_unlock()
+
+从 buffer pool 取得 buffer
+    → 归还 buffer
+
+socket / fd
+    → 对应关闭或收尾
+
+cleanup 本质：
+“线程退出时应该执行什么资源收尾动作”。
+
+
+十、局部指针 vs malloc 内存
+--------------------------
+
+char *buf = malloc(1024);
+
+B 线程退出后：
+
+buf 这个局部指针变量
+    → 在线程栈上
+    → 随线程栈生命周期结束而消失
+
+但是：
+
+malloc(1024) 得到的堆内存
+    → 不会因为 buf 消失自动 free
+
+如果没有 free：
+    → 内存泄漏
+
+所以：
+
+局部指针变量
+    !=
+指针指向的堆资源
+
+
+十一、今晚最终采用的“打包”设计
+----------------------------
+
+复杂 worker 不采用大量零散：
+
+push free
+push close
+push unlock
+push ...
+
+而采用：
+
+struct worker_ctx
+    +
+一个 cleanup_worker(ctx)
+
+示例：
+
+struct worker_ctx {
+    pthread_mutex_t mutex;
+
+    char *buf;
+    int buf_valid;
+
+    int mutex_locked;
+    int stop;
+};
+
+worker_ctx
+= 集中保存 B 的长期状态和资源。
+
+cleanup_worker(ctx)
+= B 退出时统一根据 ctx 收尾。
+
+
+十二、为什么需要 valid / locked
+------------------------------
+
+cleanup 不能假设所有资源都一定申请成功。
+
+buf_valid = 1
+    → buf 确实申请成功，可以 free
+
+buf_valid = 0
+    → 不应该 free
+
+mutex_locked = 1
+    → B 确实持有锁，cleanup 可以 unlock
+
+mutex_locked = 0
+    → cleanup 不能无脑 unlock
+
+这是资源生命周期状态记录。
+
+
+十三、最终初始化模式
+--------------------
+
+pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+
+    ↓
+
+建立 ctx
+申请 B 自己需要的资源
+设置 valid / locked 状态
+
+    ↓
+
+pthread_cleanup_push(cleanup_worker, ctx);
+
+    ↓
+
+pthread_setcancelstate(oldstate, NULL);
+
+    ↓
+
+正常工作
+
+    ↓
+
+在明确安全位置：
+
+pthread_testcancel();
+
+核心思想：
+
+初始化阶段：
+    资源和 cleanup 对应关系还没建立完整，
+    暂时不要响应 cancel。
+
+完整以后：
+    恢复原来的 cancel state，
+    后面在安全位置响应 DEFERRED cancellation。
+
+
+十四、为什么恢复 oldstate
+------------------------
+
+pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+
+会保存进入保护区之前的 cancel state。
+
+离开保护区时：
+
+pthread_setcancelstate(oldstate, NULL);
+
+这样恢复原来的状态。
+
+不要武断写死：
+PTHREAD_CANCEL_ENABLE
+
+
+十五、共享资源和 mutex
+---------------------
+
+如果 B 正在持有 mutex，
+cleanup 需要先把受保护状态整理完整，
+必要资源处理完成后，
+再 unlock。
+
+原因：
+
+一旦 unlock，
+其他线程就可能马上抢到 mutex。
+
+多核 CPU 上，
+甚至不需要“CPU 从 B 切给 A”：
+A 可能正在另一个核心上等待这把锁。
+
+所以安全性不能依赖：
+
+“应该没那么巧切线程。”
+
+必须依赖：
+mutex + ownership + 正确生命周期设计。
+
+
+十六、LIFO
+----------
+
+如果使用多个 cleanup handler：
+
+先 push unlock
+再 push free
+
+cleanup 栈：
+
+栈顶
+    free
+    unlock
+栈底
+
+取消时：
+
+free
+    ↓
+unlock
+
+但资源复杂时，
+demo33 最终采用：
+
+一个 worker_ctx
++
+一个 cleanup_worker(ctx)
+
+直接在一个 cleanup 函数里控制顺序，
+更容易读和维护。
+
+
+十七、ownership
+--------------
+
+结构体里记录某个资源
+!=
+B 一定拥有这个资源。
+
+例如：
+
+private_buf
+    B 自己 malloc
+    → B cleanup 可以 free
+
+共享 mutex
+    可能由 main / 模块拥有
+    → B cleanup 最多在自己确实持锁时 unlock
+    → 不应该随便 destroy
+
+共享 queue
+    → B 可能只是使用者
+    → 不应该因为 B 退出就直接 free 整个 queue
+
+谁最终 free / close / destroy，
+由 ownership 决定。
+
+
+十八、正常退出和 cancel 退出
+----------------------------
+
+正常路径：
+
+B 工作
+    ↓
+stop == 1
+    ↓
+while 结束
+    ↓
+pthread_cleanup_pop(1)
+    ↓
+执行 cleanup_worker(ctx)
+    ↓
+return NULL
+
+
+cancel 路径：
+
+main / A：
+pthread_cancel(B)
+
+    ↓
+
+B 出现 pending cancellation request
+
+    ↓
+
+B 在 ENABLE + DEFERRED 下运行到：
+pthread_testcancel()
+
+    ↓
+
+取消生效
+    ↓
+不会正常返回
+    ↓
+pthread 自动执行已登记 cleanup_worker(ctx)
+    ↓
+B 最终结束
+
+
+十九、demo33 为什么用了 semaphore
+---------------------------------
+
+demo32 已经学过 POSIX semaphore。
+
+本 demo 用 ready_sem 只做一件事：
+
+B：
+DISABLE
+→ 建资源
+→ push cleanup
+→ 恢复 state
+→ sem_post(&ready_sem)
+
+main：
+
+sem_wait(&ready_sem)
+
+确认 B 的 cleanup 体系已经建立完整后，
+main 才发送 pthread_cancel(B)。
+
+这样不依赖：
+
+“B 初始化应该很快，main 睡一下应该够了。”
+
+
+二十、编译与运行
+----------------
+
+编译：
+
+gcc demo33_thread_cancel_cleanup.c -o demo33 -pthread
+
+
+1. cancel 路径：
+
+./demo33
+
+重点观察：
+
+main 发 pthread_cancel(B)
+B 在 pthread_testcancel() 响应
+cleanup_worker(ctx) 自动执行
+buf 被 free
+如果 B 仍持 mutex，则最后 unlock
+pthread_join 得到 PTHREAD_CANCELED
+
+
+2. normal 路径：
+
+./demo33 normal
+
+重点观察：
+
+main 设置 stop = 1
+B 正常退出 while
+真正执行 pthread_cleanup_pop(1)
+cleanup_worker(ctx) 被执行
+B return NULL
+
+
+二十一、今天只背这 10 条
+------------------------
+
+1.
+pthread_cancel()
+= 提交取消请求
+!= 立刻 kill
+
+2.
+DISABLE
+= 暂时不处理取消
+!= 挂起线程
+
+3.
+DEFERRED
+= 到 cancellation point 响应取消
+
+4.
+pthread_testcancel()
+= 显式 cancellation point
+
+5.
+pthread_cleanup_push(handler, arg)
+= 登记 cleanup
+!= 立即执行
+
+6.
+正常路径：
+pop(1)
+= 弹出 + 执行
+
+7.
+cancel 路径：
+不需要跑到 pop
+pthread 自动执行仍登记的 cleanup handlers
+
+8.
+cleanup 不是新线程
+= 被取消线程自己的退出清理流程中调用的普通函数
+
+9.
+复杂 worker：
+worker_ctx + cleanup_worker(ctx)
+
+10.
+结构体负责集中描述状态，
+ownership 决定谁有权最终 free / close / destroy。
+
+
+二十二、当前阶段不用继续深挖
+---------------------------
+
+暂时不研究：
+
+- glibc 内部 cancellation 字段具体实现
+- pthread cleanup 宏展开细节
+- 完整 graceful shutdown protocol
+
+demo33 当前目标：
+
+能读懂调用链；
+能根据输出解释 cancel / cleanup；
+知道为什么需要 ctx、DISABLE 和 cleanup。
+
+到这里即可。

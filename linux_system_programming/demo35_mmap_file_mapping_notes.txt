@@ -1,0 +1,272 @@
+﻿demo35_mmap_file_mapping_notes
+RoadToEmbedded - Linux第一轮
+主题：mmap 文件映射 / fstat / st_size / munmap / 页对齐
+
+一、核心机制
+
+read/write：
+文件 -> 内核文件页/page cache -> read()复制到用户buf -> 程序操作buf
+
+mmap：
+文件 -> 文件页/page cache -> 映射到当前进程虚拟地址空间 -> 返回指针 -> 像普通内存一样访问
+
+mmap不是直接访问内核，也不是把整个文件复制一份到用户buf。
+
+
+二、mmap函数
+
+void *mmap(
+    void *addr,
+    size_t length,
+    int prot,
+    int flags,
+    int fd,
+    off_t offset
+);
+
+1. addr
+NULL：不指定具体虚拟地址，让内核选择合适可用的位置。
+
+2. length
+映射多长，单位字节。
+映射整个文件时常用 st.st_size。
+
+3. prot
+PROT_READ：允许读
+PROT_WRITE：允许写
+PROT_READ | PROT_WRITE：允许读写
+
+4. flags
+MAP_SHARED：修改共享映射，可反映回原文件
+MAP_PRIVATE：私有映射，写时复制，原文件不因该写操作改变
+
+5. fd
+指定映射哪个已经打开的文件。
+
+6. offset
+从文件哪个位置开始映射。
+通常必须按系统页大小对齐。
+
+
+三、struct stat / fstat / st_size
+
+#include <sys/stat.h>
+
+struct stat st;
+
+struct stat：
+系统已经定义好的文件信息结构体类型。
+
+st：
+我们自己起的变量名。
+
+fstat(fd, &st);
+根据fd获取文件信息并填写到st。
+
+st.st_size：
+文件大小，单位字节。
+
+完整链：
+open -> fd -> fstat(fd,&st) -> st.st_size -> mmap长度
+
+
+四、页大小和offset对齐
+
+查询系统页大小：
+
+long page_size = sysconf(_SC_PAGESIZE);
+
+常见是4096，但不要硬编码认为所有系统都一样。
+
+如果：
+target = 5000
+page_size = 4096
+
+delta = target % page_size
+      = 904
+
+aligned = target - delta
+        = 4096
+
+于是：
+mmap(..., offset = 4096);
+
+然后：
+p[904]
+对应文件offset 5000。
+
+通用关系：
+文件真实位置 = mmap的offset + p的下标
+
+通用写法：
+delta = target % page_size;
+aligned = target - delta;
+
+
+五、p[]和页的关系
+
+如果mmap从offset=0开始：
+
+p[0]    -> 文件offset 0
+p[1]    -> 文件offset 1
+...
+p[4095] -> 文件offset 4095
+
+如果mmap从offset=4096开始：
+
+p[0]    -> 文件offset 4096
+p[1]    -> 文件offset 4097
+
+所以p[0]表示“当前映射区域第一个字节”，不一定是文件第0字节。
+
+
+六、mmap返回值
+
+成功：
+返回映射区域起始虚拟地址。
+
+失败：
+返回 MAP_FAILED，不是NULL。
+
+检查：
+
+if (p == MAP_FAILED)
+{
+    perror("mmap");
+}
+
+
+七、munmap
+
+munmap(p, length);
+
+作用：
+解除从p开始、length字节的映射。
+
+资源生命周期：
+mmap -> 使用 -> munmap
+
+munmap之后不能继续访问这段mapping。
+
+
+八、open权限
+
+O_RDONLY：只读
+O_WRONLY：只写
+O_RDWR：读写
+O_CREAT：文件不存在则创建
+
+demo35共享读写最清楚的组合：
+
+open("a.txt", O_RDWR)
+
++
+PROT_READ | PROT_WRITE
+
++
+MAP_SHARED
+
+如果O_CREAT创建新文件，新文件长度可能为0；要映射固定长度时通常需要ftruncate先扩展。
+
+
+九、perror
+
+perror()不是syscall。
+它根据errno打印错误原因。
+
+常见可配合：
+open
+read
+write
+close
+fstat
+mmap
+munmap
+sigaction
+sem_wait
+sem_post
+
+很多pthread接口失败时直接返回错误码，不依赖errno，所以不能机械套perror。
+
+
+十、demo35完整代码
+
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+int main(void)
+{
+    int fd;
+    struct stat st;
+    char *p;
+
+    fd = open("a.txt", O_RDWR);
+    if (fd == -1)
+    {
+        perror("open");
+        return 1;
+    }
+
+    if (fstat(fd, &st) == -1)
+    {
+        perror("fstat");
+        close(fd);
+        return 1;
+    }
+
+    if (st.st_size == 0)
+    {
+        printf("file is empty\n");
+        close(fd);
+        return 1;
+    }
+
+    p = mmap(
+        NULL,
+        st.st_size,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+    if (p == MAP_FAILED)
+    {
+        perror("mmap");
+        close(fd);
+        return 1;
+    }
+
+    printf("before: %c\n", p[0]);
+
+    p[0] = 'X';
+
+    printf("after : %c\n", p[0]);
+
+    if (munmap(p, st.st_size) == -1)
+    {
+        perror("munmap");
+        close(fd);
+        return 1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+
+十一、demo35第一轮验收
+
+1. 知道read/write和mmap的区别
+2. 知道mmap六个参数
+3. 会解释PROT_READ / PROT_WRITE
+4. 会解释MAP_SHARED / MAP_PRIVATE
+5. 知道fstat -> st.st_size
+6. 知道mmap失败检查MAP_FAILED
+7. 知道munmap
+8. 知道offset页对齐
+9. 会理解target / aligned / delta
+10. 知道sysconf(_SC_PAGESIZE)

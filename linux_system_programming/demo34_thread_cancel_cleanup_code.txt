@@ -1,0 +1,179 @@
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct worker_ctx {
+    pthread_mutex_t mutex;
+    char *buf;
+    int buf_valid;
+    int mutex_locked;
+    int stop;
+};
+
+static sem_t ready_sem;
+
+static void cleanup_worker(void *arg)
+{
+    struct worker_ctx *ctx = (struct worker_ctx *)arg;
+
+    printf("[B cleanup] start\n");
+
+    if (ctx->buf_valid) {
+        free(ctx->buf);
+        ctx->buf = NULL;
+        ctx->buf_valid = 0;
+        printf("[B cleanup] free(buf)\n");
+    }
+
+    if (ctx->mutex_locked) {
+        ctx->mutex_locked = 0;
+        pthread_mutex_unlock(&ctx->mutex);
+        printf("[B cleanup] unlock(mutex)\n");
+    }
+
+    printf("[B cleanup] done\n");
+}
+
+static void *thread_B(void *arg)
+{
+    struct worker_ctx *ctx = (struct worker_ctx *)arg;
+    int oldstate;
+    int oldtype;
+
+    /* 1. 初始化阶段暂时不响应 cancel */
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+
+    /* 2. demo33 明确使用延迟取消 */
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, &oldtype);
+
+    /* 3. 建立 B 自己拥有的资源 */
+    ctx->buf = malloc(1024);
+    if (ctx->buf == NULL) {
+        fprintf(stderr, "[B] malloc failed\n");
+        pthread_setcancelstate(oldstate, NULL);
+        return NULL;
+    }
+
+    ctx->buf_valid = 1;
+    ctx->mutex_locked = 0;
+    ctx->stop = 0;
+
+    /*
+     * 4. 登记统一 cleanup：
+     *    如果后面进入 cancellation cleanup，
+     *    调用 cleanup_worker(ctx)。
+     */
+    pthread_cleanup_push(cleanup_worker, ctx);
+
+    /* 5. cleanup 体系已建立完整，恢复原 cancel state */
+    pthread_setcancelstate(oldstate, NULL);
+
+    /* 告诉 main：现在可以发 cancel / stop */
+    sem_post(&ready_sem);
+
+    printf("[B] ready\n");
+
+    while (1) {
+        pthread_mutex_lock(&ctx->mutex);
+        ctx->mutex_locked = 1;
+
+        if (ctx->stop) {
+            ctx->mutex_locked = 0;
+            pthread_mutex_unlock(&ctx->mutex);
+            break;
+        }
+
+        /* 模拟 B 正在使用自己的资源 */
+        ctx->buf[0] = 'B';
+
+        /*
+         * 6. 显式 cancellation point。
+         *
+         * 无 pending cancel：
+         *     正常返回，继续 while。
+         *
+         * 有 pending cancel + ENABLE + DEFERRED：
+         *     在这里响应取消；
+         *     不正常返回；
+         *     自动执行已登记 cleanup。
+         */
+        pthread_testcancel();
+
+        ctx->mutex_locked = 0;
+        pthread_mutex_unlock(&ctx->mutex);
+    }
+
+    /*
+     * 7. 正常退出路径才会实际运行到这里。
+     *    pop(1) = 弹出最上面的 handler，并执行。
+     *
+     *    cancel 路径不会执行到这里。
+     */
+    pthread_cleanup_pop(1);
+
+    printf("[B] normal return\n");
+    return NULL;
+}
+
+int main(int argc, char *argv[])
+{
+    pthread_t tid_b;
+    void *thread_result = NULL;
+
+    struct worker_ctx ctx = {
+        .buf = NULL,
+        .buf_valid = 0,
+        .mutex_locked = 0,
+        .stop = 0
+    };
+
+    if (pthread_mutex_init(&ctx.mutex, NULL) != 0) {
+        fprintf(stderr, "pthread_mutex_init failed\n");
+        return 1;
+    }
+
+    if (sem_init(&ready_sem, 0, 0) != 0) {
+        perror("sem_init");
+        pthread_mutex_destroy(&ctx.mutex);
+        return 1;
+    }
+
+    if (pthread_create(&tid_b, NULL, thread_B, &ctx) != 0) {
+        fprintf(stderr, "pthread_create failed\n");
+        sem_destroy(&ready_sem);
+        pthread_mutex_destroy(&ctx.mutex);
+        return 1;
+    }
+
+    /*
+     * 等 B 完成：
+     * DISABLE -> 建资源 -> push cleanup -> 恢复 state
+     */
+    sem_wait(&ready_sem);
+
+    if (argc > 1 && strcmp(argv[1], "normal") == 0) {
+        printf("[main] request normal stop\n");
+
+        pthread_mutex_lock(&ctx.mutex);
+        ctx.stop = 1;
+        pthread_mutex_unlock(&ctx.mutex);
+    } else {
+        printf("[main] pthread_cancel(B)\n");
+        pthread_cancel(tid_b);
+    }
+
+    pthread_join(tid_b, &thread_result);
+
+    if (thread_result == PTHREAD_CANCELED) {
+        printf("[main] B was canceled\n");
+    } else {
+        printf("[main] B exited normally\n");
+    }
+
+    sem_destroy(&ready_sem);
+    pthread_mutex_destroy(&ctx.mutex);
+
+    return 0;
+}

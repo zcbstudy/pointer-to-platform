@@ -1,0 +1,254 @@
+demo32_POSIX_semaphore_信号量_笔记
+日期：2026-08-18
+RoadToEmbedded / linux学习2
+
+一、核心目标
+semaphore（信号量）主要负责“可用许可 / 可用名额的数量”。
+它不是实际资源本身，也不知道“具体是哪一个资源”。
+
+二、四个基础 API
+#include <semaphore.h>
+
+sem_t sem;
+
+1. sem_init(&sem, 0, 2);
+   &sem：sem 对象的地址
+   0：同一进程内线程共享
+   2：初始有 2 个 permit
+
+2. sem_wait(&sem);
+   当前 permit > 0：减 1，继续执行
+   当前 permit == 0：阻塞等待
+   不是 busy waiting
+
+3. sem_post(&sem);
+   增加 1 个 permit
+   若有等待线程，则一个等待线程可以继续
+   若无人等待，则 permit 保留下来
+
+4. sem_destroy(&sem);
+   semaphore 生命周期结束时销毁
+
+三、最小模型
+初始 sem = 2
+
+A：wait -> 2 -> 1
+B：wait -> 1 -> 0
+C：wait -> 没有 permit，阻塞
+A：post -> 出现一个 permit -> 一个等待线程可以继续
+
+四、pshared
+sem_init(&sem, 0, N)
+0：同一进程内线程共享
+
+sem_init(shared_sem, 1, N)
+非 0：用于进程间共享
+注意：pshared != 0 不会自动创建共享内存。
+sem 本身必须位于多个进程都能访问的共享内存中。
+
+五、函数 / 线程 / 进程术语
+函数：一段代码，由线程执行。
+线程：独立执行流；pthread_create 创建新线程并从指定线程函数开始执行。
+同一进程内线程共享进程地址空间。
+进程：拥有独立地址空间，可以包含多个线程。
+fork：创建新进程。
+exec/execl：不创建新进程，而是替换当前进程的程序映像。
+
+六、阻塞不等于死锁
+正常阻塞：
+C 在 sem_wait 等待，A/B 最终会 post，C 后面能继续。
+
+无限等待：
+以后再也没有任何线程 post，C 可能永久阻塞。
+
+死锁：
+例如总共 2 份资源，A/B 都需要 2 份：
+A 先拿 1 份，B 先拿 1 份；
+A 等第二份，B 也等第二份；
+双方都无法完成，也无法释放。
+这是经典死锁。
+
+七、一次 sem_wait 只能拿一个 permit
+sem_wait(&sem) 一次固定获取 1 个 permit。
+
+不存在：
+sem_wait(&sem, 2);
+
+连续两次 sem_wait 也不是“一次原子拿两个”。
+中间可能被其他线程插入，因此可能形成资源拆分甚至死锁。
+
+八、一次必须原子取得 N 个资源
+更适合：
+mutex + condition variable + available 计数
+
+示意：
+
+pthread_mutex_lock(&mutex);
+
+while (available < need)
+{
+    pthread_cond_wait(&cond, &mutex);
+}
+
+available -= need;
+
+pthread_mutex_unlock(&mutex);
+
+while 是先判断后执行。
+例如：
+available = 3
+need = 2
+3 < 2 为假，不等待
+available -= 2
+结果 available = 1
+
+如果：
+available = 1
+need = 2
+1 < 2 为真
+进入 cond_wait 等待
+
+九、semaphore 与 cond 的区别
+cond：
+通知“条件可能变化了”，真实条件一般另存在 ready、queue_count、available 等变量中。
+
+semaphore：
+自身维护 permit 数量。
+wait：有则减 1，无则阻塞。
+post：增加 1。
+
+cond_signal：
+当时没人等待时，这次通知不会保存为未来通知。
+
+sem_post：
+没人等待时，permit 会保留下来。
+
+pthread_cond_signal：唤醒一个等待者。
+pthread_cond_broadcast：唤醒全部等待者。
+sem_post：增加一个 permit，因此一个等待线程可以取得它。
+
+十、semaphore 没有 mutex 那样的 ownership
+mutex 通常强调“谁获得锁，谁解锁”。
+
+semaphore 不记录：
+“这个 permit 是 A 拿的，所以必须 A post”。
+
+因此 A wait 一次后又错误 post 两次，
+semaphore 不会因为“A只拿过一次”自动识别为业务错误。
+
+十一、多 post：计数与真实资源失配
+假设真实资源池只有 2 个 buffer：
+
+buffer[0]
+buffer[1]
+
+两个 buffer 都被占用后：
+真实空闲资源 = 0
+sem = 0
+
+如果程序错误 sem_post：
+sem 可能认为又有 1 个 permit，
+但真实空闲资源仍然是 0。
+
+这不是“真的多出一个 buffer”，
+而是 semaphore 账面和真实资源状态不一致。
+属于 over-release / accounting mismatch。
+
+直觉上与野指针有相似感：
+某一层告诉程序“有东西可用”，实际对象却不合法或不存在。
+但专业上它不是野指针问题。
+
+十二、少 post：permit / capacity 泄漏
+真实资源已经可以重新使用，
+但忘记 sem_post：
+
+真实资源存在，
+semaphore 却仍然认为没有名额。
+
+长期累积后可能导致所有线程阻塞。
+
+十三、sem 只知道数量，不知道资源身份
+例如：
+Buffer buffer[3];
+
+sem = 2
+只表示“有两份可用”，
+不知道具体是 buffer[0]、buffer[1] 还是 buffer[2]。
+
+真实资源池通常还需要：
+queue
+array
+bitmap
+used[]
+资源 ID / 下标
+
+例如：
+free_queue = [0, 2]
+表示具体是 0 号和 2 号资源空闲。
+
+sem：管“有几个”
+queue / 状态表：管“具体是哪几个”
+
+十四、如果必须拿指定资源
+例如必须拿 buffer[1]，
+一个总量 semaphore 不足以表达。
+
+需要额外资源状态：
+used[]
+bitmap
+独立同步对象
+mutex + condition variable
+资源管理器
+
+十五、资源池的工程组合
+典型组合：
+semaphore + mutex + queue/array/bitmap/状态表
+
+semaphore：
+管可用数量
+
+queue / array / bitmap：
+管资源身份
+
+mutex：
+保护共享资源表和队列
+
+封装：
+buffer_acquire()
+buffer_release(id)
+
+release 内部应检查：
+1. id 是否属于资源池
+2. 资源当前是否真的处于占用状态
+3. 真实资源成功放回后，才 sem_post
+
+这样可以减少：
+重复释放
+非法释放
+凭空多 post
+
+十六、今天最终掌握
+1. sem_init：初始化
+2. sem_wait：拿一个 permit，没有就阻塞
+3. sem_post：增加一个 permit
+4. sem_destroy：销毁
+5. sem 只负责数量，不负责具体资源身份
+6. 连续多个 sem_wait 不是原子申请多个资源
+7. 多 post 会造成账面虚增
+8. 少 post 会造成 permit/capacity 泄漏
+9. 真正资源池需要更高一层资源管理逻辑
+
+十七、今天不需要实现
+完整 buffer pool
+完整 resource manager
+指定资源等待系统
+一次原子申请 N 个资源的完整模块
+used[] + queue + semaphore 的完整工程版
+
+这些留到后续组合 / 项目阶段再做。
+
+一句话总结：
+semaphore 是“可用许可数量的同步账本”。
+wait 消耗一个许可，没有就阻塞；
+post 增加一个许可；
+真实资源身份、状态和生命周期仍由程序负责管理。

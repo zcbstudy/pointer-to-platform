@@ -1,0 +1,276 @@
+demo28_deadlock_trylock_notes.txt
+RoadToEmbedded · Linux 系统编程
+主题：pthread mutex 死锁、锁顺序与 trylock
+日期：2026-08-12
+
+一、为什么学死锁
+demo27 学会了用 mutex 保护共享数据。
+demo28 继续解决：多把 mutex 使用不当时，线程可能互相等待，导致程序永久无法继续。
+
+二、典型死锁
+线程 A：
+    lock(a)
+    lock(b)
+
+线程 B：
+    lock(b)
+    lock(a)
+
+可能出现：
+    A 持有 a，等待 b
+    B 持有 b，等待 a
+
+形成循环等待：
+    A -> B -> A
+
+三、sleep 不会释放 mutex
+线程执行 sleep() 时只是暂停执行。
+如果 sleep 前已经持有 mutex，这把 mutex 仍然由该线程持有。
+
+sleep 常用于实验中扩大并发窗口，使死锁更容易复现，但不是死锁的根本原因。
+
+四、统一加锁顺序
+如果所有线程都严格规定：
+    a -> b -> c
+
+那么等待关系不会反向形成环。
+
+例：
+    A 先拿到 a
+    B 想拿 a -> 阻塞
+    B 此时不会先拿 b
+
+这会破坏“循环等待”条件，从而避免这组 mutex 的锁顺序反转死锁。
+
+五、经典死锁四个必要条件
+1. 互斥
+2. 持有并等待
+3. 不可抢占
+4. 循环等待
+
+统一锁顺序主要破坏的是：
+    循环等待
+
+注意：
+即使统一锁顺序，“持有并等待”仍然可能存在。
+例如 A 已经持有 a，正在等待 b。
+
+六、持锁期间 join 的风险
+错误结构：
+
+线程 A：
+    lock(a)
+    pthread_join(B, NULL)
+    unlock(a)
+
+线程 B：
+    lock(a)
+    ...
+    unlock(a)
+    return
+
+如果 A 先拿到 a：
+    A 持有 a，等待 B 结束
+    B 等待 a，只有拿到 a 才能完成并退出
+
+于是：
+    A 等 B
+    B 等 A 释放 a
+    -> 死锁
+
+重要：
+pthread_join(B, NULL)
+不是“再执行一次 B”，
+而是“等待并完成对线程 B 的 join”。
+
+如果 B 已经结束，再调用 pthread_join(B, NULL)，通常会很快返回。
+
+七、同一线程重复锁同一把普通 mutex
+危险结构：
+
+void func_b(void)
+{
+    pthread_mutex_lock(&mutex);
+    ...
+    pthread_mutex_unlock(&mutex);
+}
+
+void func_a(void)
+{
+    pthread_mutex_lock(&mutex);
+
+    func_b();  // 同一线程进入 func_b
+
+    pthread_mutex_unlock(&mutex);
+}
+
+执行链：
+    线程 A 进入 func_a
+    -> lock(mutex) 成功
+    -> 调用 func_b
+    -> 仍然是线程 A
+    -> func_b 再次 lock 同一把 mutex
+    -> 线程 A 等自己释放 mutex
+    -> 但 unlock 在 func_b 返回之后
+    -> 自死锁（self-deadlock）
+
+注意：
+如果 func_a 和 func_b 各自独立，并且每次都是：
+    lock -> 操作 -> unlock
+则没有上述“同一线程重复锁自己”的问题。
+
+八、pthread_mutex_trylock()
+函数：
+
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+
+常用返回值：
+    0       -> 成功拿到锁
+    EBUSY   -> mutex 当前正被占用，没有拿到锁，但不会阻塞
+
+EBUSY 宏来自：
+    #include <errno.h>
+
+与 pthread_mutex_lock() 的区别：
+
+pthread_mutex_lock()
+    拿不到 -> 阻塞等待
+
+pthread_mutex_trylock()
+    拿不到 -> 立即返回 EBUSY
+
+九、用 trylock 拆掉两锁死锁
+原模型：
+    A：lock(a) -> lock(b)
+    B：lock(b) -> lock(a)
+
+可以只让 A 的第二把锁使用 trylock：
+
+    A 先 lock(a)
+    ret = pthread_mutex_trylock(&b)
+
+    if (ret == EBUSY)
+    {
+        pthread_mutex_unlock(&a);
+        return / 之后重试;
+    }
+
+如果 b 已被 B 持有：
+    A 不会卡在 b 上
+    A 主动释放 a
+    B 就有机会拿到 a 并继续执行
+
+关键：
+trylock 本身不是“万能防死锁”。
+真正打断死锁的是：
+    第二把锁拿不到
+    -> 不阻塞
+    -> 主动释放已持有的第一把锁
+
+十、trylock 的局限
+如果双方都不断：
+    拿第一把锁
+    trylock 第二把
+    失败
+    放第一把
+    立即重试
+
+可能出现双方一直运行但始终做不成工作的情况。
+这属于 livelock（活锁）风险。
+
+工程优先级：
+    优先统一锁顺序
+    必要时再考虑 trylock + 退让/重试策略
+
+十一、两个 mutex 如何传给线程
+pthread_create() 第四参数只有一个 void *。
+
+可以用结构体打包：
+
+struct Locks
+{
+    pthread_mutex_t *a;
+    pthread_mutex_t *b;
+};
+
+main：
+
+pthread_mutex_t mutex_a;
+pthread_mutex_t mutex_b;
+
+struct Locks data;
+
+data.a = &mutex_a;
+data.b = &mutex_b;
+
+pthread_create(&thread_a, NULL, worker_a, &data);
+pthread_create(&thread_b, NULL, worker_b, &data);
+
+worker：
+
+void *worker_a(void *arg)
+{
+    struct Locks *data = arg;
+
+    pthread_mutex_lock(data->a);
+    ...
+}
+
+注意：
+main 中 data 是结构体对象：
+    data.a
+    data.b
+
+worker 中 data 是结构体指针：
+    data->a
+    data->b
+
+结构体成员本身已经是 pthread_mutex_t *，
+所以使用：
+    pthread_mutex_lock(data->a)
+
+不是：
+    pthread_mutex_lock(&data->a)
+
+十二、mutex 生命周期
+两把真实 mutex 在 create 前初始化：
+
+pthread_mutex_init(&mutex_a, NULL);
+pthread_mutex_init(&mutex_b, NULL);
+
+线程全部 join 后再：
+
+pthread_mutex_destroy(&mutex_b);
+pthread_mutex_destroy(&mutex_a);
+
+十三、初始化失败时的资源清理
+如果：
+
+pthread_mutex_init(&mutex_a, NULL)
+失败：
+    mutex_a 没有成功初始化
+    直接退出
+    不 destroy 失败的 mutex_a
+
+如果：
+    mutex_a 初始化成功
+    mutex_b 初始化失败
+
+那么：
+    destroy(mutex_a)
+    return
+
+原则：
+    谁已经成功初始化，后续失败退出时就清理谁
+    谁本身初始化失败，不对它调用 destroy
+
+destroy 不是 free。
+它销毁的是 mutex 的已初始化状态，不是删除变量本身。
+
+十四、demo28 最终工程结论
+1. 多把锁尽量使用统一的全局加锁顺序。
+2. 持锁期间避免进入可能等待另一个需要当前锁的执行流，例如危险的 join。
+3. 普通 mutex 不要在同一线程中重复获取同一把锁。
+4. trylock 可以让线程在拿不到锁时立即返回，从而提供“主动退让”的机会。
+5. trylock 不是万能解法，错误重试策略仍可能导致活锁或饥饿。
+6. pthread_join() 是等待线程结束，不是重新执行线程。

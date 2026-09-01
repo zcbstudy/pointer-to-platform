@@ -1,0 +1,692 @@
+demo29_pthread_cond_notes.txt
+RoadToEmbedded · Linux系统编程
+主题：pthread 条件变量（pthread_cond_t）
+日期：2026-08-15
+
+一、学习目的
+
+mutex 能解决“多个线程不能同时修改共享数据”的问题，
+但它不能单独解决“线程现在没有资源，应该怎么等待”的问题。
+
+如果一直这样检查：
+
+while (ready == 0)
+{
+}
+
+这属于忙等，会持续占用 CPU。
+
+条件变量 pthread_cond_t 的作用是：
+
+条件不满足
+→ 释放 mutex
+→ 线程睡眠
+→ 等其他线程通知
+→ 被唤醒
+→ 重新获得 mutex
+→ 再检查真正的条件
+
+
+二、demo29 的三个核心角色
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+int ready = 0;
+
+1. mutex
+   互斥锁。
+   用来保护共享状态 ready。
+
+2. ready
+   真正的共享条件 / 资源状态。
+   这里约定：
+   ready == 0：没有资源
+   ready == 1：有资源
+
+3. cond
+   条件变量。
+   它不是锁。
+   它负责让线程等待，以及通知等待线程醒来。
+
+核心分工：
+
+mutex → 保护 ready
+ready → 决定线程能不能继续工作
+cond  → 负责等待和通知
+
+
+三、初始化
+
+mutex：
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+cond：
+
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+注意：
+
+PTHREAD_MUTEX_INITIALIZER
+→ 初始化 mutex
+
+PTHREAD_COND_INITIALIZER
+→ 初始化 cond
+
+它们都有 INITIALIZER，
+只是因为两种 pthread 对象都需要初始化，
+不代表 cond 也是一把锁。
+
+
+四、pthread_cond_wait()
+
+核心函数：
+
+pthread_cond_wait(&cond, &mutex);
+
+两个参数：
+
+&cond
+→ 当前线程等待在哪个条件变量上
+
+&mutex
+→ wait 时需要释放的 mutex，
+  被唤醒以后还要重新获得这把 mutex
+
+
+五、pthread_cond_wait() 的完整过程
+
+假设消费者线程 A：
+
+pthread_mutex_lock(&mutex);
+
+while (ready == 0)
+{
+    pthread_cond_wait(&cond, &mutex);
+}
+
+执行过程：
+
+A 获得 mutex
+→ 检查 ready
+→ ready == 0
+→ 执行 pthread_cond_wait()
+→ 自动释放 mutex
+→ A 在 cond 上睡眠等待
+
+所以 A 睡眠期间：
+
+1. 不再占着 mutex
+2. 不会一直循环检查 ready
+3. 不会因为等待而持续浪费 CPU
+
+这也是 cond_wait 必须和 mutex 配合的重要原因。
+
+
+六、A 睡着以后，谁告诉它资源到了？
+
+A 睡着以后不会在后台自动检查 ready。
+
+假设生产线程 C：
+
+pthread_mutex_lock(&mutex);
+
+ready = 1;
+
+pthread_cond_signal(&cond);
+
+pthread_mutex_unlock(&mutex);
+
+这里：
+
+ready = 1;
+→ 真正修改共享状态
+
+pthread_cond_signal(&cond);
+→ 通知等待这个 cond 的一个线程：
+  “状态可能变了，可以醒来重新检查。”
+
+注意：
+
+ready 才是真正的条件。
+cond 只是等待 / 通知机制。
+
+
+七、被 signal 唤醒以后发生什么？
+
+signal 并不代表线程立刻继续执行。
+
+完整过程：
+
+A 被 signal 唤醒
+→ A 开始重新竞争 mutex
+→ 如果 mutex 还被 C 持有，A 继续等待 mutex
+→ A 最终获得 mutex
+→ pthread_cond_wait() 才返回
+→ 从 wait 后面的代码继续执行
+
+所以：
+
+“被唤醒”
+和
+“已经可以继续执行用户代码”
+
+不是同一件事。
+
+
+八、wait 到底从哪里恢复执行？
+
+这是 demo29 最重要的理解点之一。
+
+例如：
+
+while (ready == 0)
+{
+    pthread_cond_wait(&cond, &mutex);
+}
+
+printf("use resource\n");
+
+A 被唤醒，并重新获得 mutex 后：
+
+pthread_cond_wait()
+→ 函数返回
+→ 从 pthread_cond_wait() 后面继续
+
+不会：
+
+1. 从线程函数最开头重新执行
+2. 从 pthread_mutex_lock() 后面重新执行
+3. 自动重新执行前面的 if
+
+程序计数器仍然回到当前函数调用返回后的正常位置。
+
+
+九、为什么必须使用 while，而不是 if？
+
+不推荐：
+
+if (ready == 0)
+{
+    pthread_cond_wait(&cond, &mutex);
+}
+
+问题在于：
+
+if 只判断一次。
+
+例如：
+
+A：
+ready == 0
+→ 进入 if
+→ cond_wait
+→ 睡眠
+
+C：
+ready = 1
+→ signal A
+
+但是 A 还没有重新拿到 mutex。
+
+如果另一个线程 B 先拿到 mutex：
+
+B：
+拿到 mutex
+→ 使用资源
+→ ready = 0
+→ unlock
+
+然后 A 才重新拿到 mutex。
+
+此时：
+
+ready == 0
+
+但是 A 的 if 早就判断过了。
+
+pthread_cond_wait() 返回以后，
+A 会直接执行 if 后面的代码，
+不会自动重新判断那个 if。
+
+因此可能出现：
+资源已经没了，A 却继续工作。
+
+
+十、while 为什么可以解决？
+
+正确写法：
+
+while (ready == 0)
+{
+    pthread_cond_wait(&cond, &mutex);
+}
+
+wait 返回以后：
+
+→ 到达 while 循环体结尾
+→ while 自动回到条件判断
+→ 再次检查 ready
+
+如果：
+
+ready == 0
+
+那么：
+
+→ 再次 pthread_cond_wait()
+→ 再次释放 mutex
+→ 再次睡眠
+
+如果：
+
+ready == 1
+
+才：
+
+→ 跳出 while
+→ 使用资源
+
+核心结论：
+
+signal 只表示：
+“条件可能发生变化了。”
+
+它不保证：
+“资源现在一定还在。”
+
+所以醒来以后必须重新检查真正的共享条件。
+
+
+十一、pthread_cond_signal()
+
+函数：
+
+pthread_cond_signal(&cond);
+
+作用：
+
+唤醒等待在这个 cond 上的一个线程。
+
+例如：
+
+A：等待 cond
+B：等待 cond
+D：等待 cond
+
+执行：
+
+pthread_cond_signal(&cond);
+
+可能唤醒 A，
+也可能唤醒 B，
+也可能唤醒 D。
+
+普通程序不能依赖固定顺序。
+
+学习时可以简单记：
+
+signal = 随便喊一个
+
+更严谨的说法：
+
+signal 唤醒一个 waiter，
+具体是哪一个，不由普通程序保证。
+
+
+十二、pthread_cond_broadcast()
+
+函数：
+
+pthread_cond_broadcast(&cond);
+
+作用：
+
+唤醒所有等待这个 cond 的线程。
+
+例如：
+
+A：睡在 cond
+B：睡在 cond
+D：睡在 cond
+
+broadcast 以后：
+
+A：醒
+B：醒
+D：醒
+
+但是：
+
+mutex 同一时刻仍然只能被一个线程持有。
+
+因此：
+
+A、B、D
+→ 都开始重新竞争 mutex
+→ 谁先拿到 mutex，谁先从 cond_wait 返回
+→ 其他线程继续等待 mutex
+
+学习时可以直接记：
+
+signal    = 喊一个
+broadcast = 全喊起来
+
+
+十三、signal 与 broadcast 的核心区别
+
+signal：
+
+A、B、D 都在等 cond
+→ signal
+→ 只唤醒其中一个
+→ 另外两个继续睡在 cond 上
+
+broadcast：
+
+A、B、D 都在等 cond
+→ broadcast
+→ A、B、D 全部被唤醒
+→ 三个线程都重新竞争 mutex
+
+
+十四、broadcast 后为什么 while 更重要？
+
+假设只有一份资源：
+
+ready = 1;
+
+然后：
+
+pthread_cond_broadcast(&cond);
+
+A、B、D 全部醒来。
+
+假设 B 先获得 mutex：
+
+B：
+ready == 1
+→ 使用资源
+→ ready = 0
+→ unlock
+
+然后 A 得到 mutex：
+
+A：
+cond_wait 返回
+→ while 再检查 ready
+→ ready == 0
+→ 再次 cond_wait
+→ 释放 mutex
+→ 再次睡眠
+
+D 同理。
+
+所以：
+
+被唤醒 ≠ 一定还有资源。
+
+
+十五、没有资源不等于死锁
+
+例如：
+
+A、B、D 都发现：
+
+ready == 0
+
+于是都执行：
+
+pthread_cond_wait(&cond, &mutex);
+
+它们会：
+
+释放 mutex
+→ 睡眠等待
+
+这不是经典 mutex 死锁。
+
+生产线程 C 仍然可以：
+
+获得 mutex
+→ 生产资源
+→ ready = 1
+→ signal / broadcast
+→ unlock
+
+然后重新唤醒消费者。
+
+经典死锁更像：
+
+线程 A：
+拿 lock1
+→ 等 lock2
+
+线程 B：
+拿 lock2
+→ 等 lock1
+
+形成环形等待，
+双方都无法继续。
+
+
+十六、一个生产者 + 一个消费者的完整 demo
+
+#include <stdio.h>
+#include <pthread.h>
+#include <unistd.h>
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+int ready = 0;
+
+void *consumer(void *arg)
+{
+    (void)arg;
+
+    pthread_mutex_lock(&mutex);
+
+    while (ready == 0)
+    {
+        printf("consumer: no resource, wait...\n");
+
+        pthread_cond_wait(&cond, &mutex);
+    }
+
+    printf("consumer: resource ready, start working\n");
+
+    ready = 0;
+
+    pthread_mutex_unlock(&mutex);
+
+    return NULL;
+}
+
+void *producer(void *arg)
+{
+    (void)arg;
+
+    sleep(2);
+
+    pthread_mutex_lock(&mutex);
+
+    printf("producer: create resource\n");
+
+    ready = 1;
+
+    pthread_cond_signal(&cond);
+
+    pthread_mutex_unlock(&mutex);
+
+    return NULL;
+}
+
+int main(void)
+{
+    pthread_t tid_consumer;
+    pthread_t tid_producer;
+
+    pthread_create(&tid_consumer, NULL, consumer, NULL);
+    pthread_create(&tid_producer, NULL, producer, NULL);
+
+    pthread_join(tid_consumer, NULL);
+    pthread_join(tid_producer, NULL);
+
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond);
+
+    return 0;
+}
+
+
+十七、编译
+
+gcc -Wall -Wextra -std=c11 demo29_pthread_cond.c -o demo29 -pthread
+
+
+十八、运行
+
+./demo29
+
+
+十九、预期输出
+
+consumer: no resource, wait...
+producer: create resource
+consumer: resource ready, start working
+
+执行过程：
+
+consumer 先运行
+→ lock
+→ ready == 0
+→ cond_wait
+→ 释放 mutex
+→ 睡眠
+
+producer 运行
+→ lock
+→ ready = 1
+→ signal
+→ unlock
+
+consumer 被唤醒
+→ 重新获得 mutex
+→ cond_wait 返回
+→ while 再检查 ready
+→ ready == 1
+→ 使用资源
+→ ready = 0
+→ unlock
+
+
+二十、销毁
+
+pthread_mutex_destroy(&mutex);
+pthread_cond_destroy(&cond);
+
+分别销毁 mutex 和 cond。
+
+销毁前必须保证：
+已经没有线程继续使用这些对象。
+
+
+二十一、demo29 最终执行链
+
+消费者 A：
+
+lock mutex
+→ 检查 ready
+→ ready == 0
+→ cond_wait
+→ 自动释放 mutex
+→ 睡在 cond 上
+
+生产者 C：
+
+lock mutex
+→ ready = 1
+→ signal(cond)
+→ unlock mutex
+
+消费者 A：
+
+收到 signal
+→ 重新竞争 mutex
+→ 获得 mutex
+→ cond_wait 返回
+→ while 重新检查 ready
+→ ready == 1
+→ 使用资源
+→ ready = 0
+→ unlock mutex
+
+
+二十二、最终总结
+
+mutex：
+保护共享状态。
+
+ready：
+真正决定当前有没有资源。
+
+cond：
+负责等待和通知，不是锁。
+
+pthread_cond_wait：
+释放 mutex
+→ 睡眠
+→ 被唤醒
+→ 重新获得 mutex
+→ 函数返回
+
+pthread_cond_signal：
+唤醒一个等待当前 cond 的线程。
+
+pthread_cond_broadcast：
+唤醒所有等待当前 cond 的线程。
+
+while：
+每次 wait 返回以后，
+重新确认真正的共享条件是否满足。
+
+
+二十三、工程意义
+
+demo29 不是为了只记三个函数：
+
+pthread_cond_wait()
+pthread_cond_signal()
+pthread_cond_broadcast()
+
+真正要掌握的是：
+
+线程现在没有任务时，
+不能靠忙等浪费 CPU；
+
+任务产生以后，
+要有可靠的等待 / 唤醒机制；
+
+即使多个线程竞争，
+程序也不能依赖固定调度顺序才能正确运行。
+
+以后真正的工程场景会扩展成：
+
+Camera
+→ Frame Queue
+→ mutex + cond
+→ 多个 worker
+→ YOLO / OpenCV / Depth
+
+此时 ready 不再只是简单的 0 / 1，
+而会扩展为：
+
+任务队列
+队列长度
+buffer 状态
+停止标志
+资源生命周期
+
+这也是后续从“会 API”走向“能解决工程问题”的方向。

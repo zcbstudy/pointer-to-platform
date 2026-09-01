@@ -1,0 +1,875 @@
+2026-08-16 Linux 多线程学习笔记
+主题：pthread 读写锁 try / timed 接口、busy waiting、timespec、ETIMEDOUT
+
+============================================================
+一、读写锁核心复习
+============================================================
+
+常用接口：
+
+    pthread_rwlock_rdlock(&rwlock);
+    pthread_rwlock_wrlock(&rwlock);
+    pthread_rwlock_unlock(&rwlock);
+
+基本规则：
+
+    读 + 读     可以并发
+    读 + 写     不可以同时持有
+    写 + 读     不可以同时持有
+    写 + 写     不可以同时持有
+
+核心结论：
+
+1. 读锁是共享锁。
+2. 写锁是独占锁。
+3. 一个线程真正持有写锁期间，其他线程不能同时获得同一把 rwlock 的读锁或写锁。
+4. “写线程正在等待” != “写线程已经拿到写锁”。
+5. 写线程等待期间，新来的读线程是否还能获得读锁，不能简单理解成严格 FIFO，具体与实现/调度策略有关。
+
+
+============================================================
+二、为什么修改共享数据必须同步
+============================================================
+
+例如：
+
+    struct Data
+    {
+        int x;
+        int y;
+    };
+
+原状态：
+
+    x = 10
+    y = 20
+
+目标状态：
+
+    x = 100
+    y = 200
+
+如果没有正确同步，写线程可能：
+
+    data.x = 100;
+    data.y = 200;
+
+另一个线程如果在两条语句之间读取，可能看到：
+
+    x = 100
+    y = 20
+
+这属于“中间状态”。
+
+如果写线程正确使用：
+
+    pthread_rwlock_wrlock(&rwlock);
+
+    data.x = 100;
+    data.y = 200;
+
+    pthread_rwlock_unlock(&rwlock);
+
+而读线程也使用同一把 rwlock 的读锁，那么写线程持有写锁期间，读线程无法取得读锁。
+
+所以读线程正常看到的是：
+
+    完整旧状态
+
+或者：
+
+    完整新状态
+
+而不是修改到一半的状态。
+
+
+============================================================
+三、try 版本读写锁
+============================================================
+
+接口：
+
+    pthread_rwlock_tryrdlock(&rwlock);
+    pthread_rwlock_trywrlock(&rwlock);
+
+try 的核心：
+
+    “当前这一瞬间尝试一次。”
+
+普通 wrlock：
+
+    pthread_rwlock_wrlock(&rwlock);
+
+拿不到：
+
+    阻塞等待
+        ↓
+    以后锁变得可用
+        ↓
+    再参与竞争
+        ↓
+    获得锁后函数返回
+
+trywrlock：
+
+    pthread_rwlock_trywrlock(&rwlock);
+
+拿不到：
+
+    立即返回
+    不等待
+    不会自动重试
+    不需要 signal/broadcast 来通知它
+
+典型判断：
+
+    int ret = pthread_rwlock_trywrlock(&rwlock);
+
+    if (ret == 0)
+    {
+        /* 成功持有写锁 */
+
+        /* 修改共享数据 */
+
+        pthread_rwlock_unlock(&rwlock);
+    }
+    else if (ret == EBUSY)
+    {
+        /* 当前锁忙，本次尝试失败 */
+    }
+
+需要：
+
+    #include <errno.h>
+
+注意：
+
+pthread 这类函数通常：
+
+    成功 -> 返回 0
+    失败 -> 直接返回错误码
+
+因此这里判断：
+
+    ret == EBUSY
+
+不是依赖 errno。
+
+
+============================================================
+四、trylock 失败后，锁后来空闲，它怎么知道？
+============================================================
+
+答案：
+
+    它不知道。
+
+一次：
+
+    pthread_rwlock_trywrlock()
+
+失败返回以后，这一次尝试已经结束。
+
+例如：
+
+    B trywrlock
+        ↓
+    失败并立即返回
+        ↓
+    A 后来 unlock
+
+A 释放锁以后：
+
+    B 不会自动回来
+    B 不会自动获得锁
+    B 也不会自动收到 signal
+
+如果以后还想拿锁：
+
+    必须由程序逻辑再次调用 trywrlock()
+
+所以：
+
+    trylock 不是“另一种等待锁”
+    trylock 是“允许本次不等待”。
+
+
+============================================================
+五、什么时候适合 trylock
+============================================================
+
+如果任务：
+
+    必须执行
+    必须获得锁以后才能继续
+
+通常直接使用：
+
+    pthread_rwlock_wrlock()
+
+如果任务允许：
+
+    当前能做就做
+    当前做不了可以暂时跳过/降级/继续做其他工作
+
+则 trylock 有意义。
+
+示意：
+
+    while (1)
+    {
+        do_other_work();
+
+        if (pthread_rwlock_trywrlock(&rwlock) == 0)
+        {
+            update_data();
+
+            pthread_rwlock_unlock(&rwlock);
+        }
+
+        do_more_work();
+    }
+
+这里循环中还有正常业务。
+
+不是为了：
+
+    try
+    try
+    try
+    try...
+
+
+============================================================
+六、busy waiting（忙等）
+============================================================
+
+典型写法：
+
+    while (pthread_rwlock_trywrlock(&rwlock) != 0)
+    {
+    }
+
+逻辑：
+
+    try失败
+        ↓
+    立即再try
+        ↓
+    再失败
+        ↓
+    再try……
+
+线程不睡眠，一直消耗 CPU 时间片。
+
+这就是：
+
+    busy waiting / 忙等
+
+通常：
+
+    必须等到锁 -> 普通 lock
+
+    允许本次失败 -> trylock
+
+    空循环疯狂 try -> 通常浪费 CPU
+
+
+============================================================
+七、实时系统中的 trylock
+============================================================
+
+不能简单记成：
+
+    实时系统 = trylock
+    普通系统 = lock
+
+实时系统真正关心：
+
+    deadline（截止时间）
+    阻塞时间是否有上界
+    执行时间是否可预测
+    是否允许本周期降级
+
+例如一个 10ms 周期任务：
+
+    trylock 成功
+        -> 使用最新共享数据
+
+    trylock 失败
+        -> 本周期使用旧数据 / 跳过非关键更新
+
+这样可以避免非关键锁等待破坏 deadline。
+
+但如果任务必须完成：
+
+    try失败 -> 直接丢任务
+
+这种设计通常不合理。
+
+
+============================================================
+八、timed 版本：有限等待
+============================================================
+
+接口：
+
+    pthread_rwlock_timedrdlock()
+    pthread_rwlock_timedwrlock()
+
+三种语义：
+
+1. lock
+
+    拿不到 -> 阻塞等待
+
+2. trylock
+
+    拿不到 -> 立即返回
+
+3. timedlock
+
+    拿不到 -> 可以等待
+    但最多等到指定“绝对截止时间”
+
+注意：
+
+timedwrlock 不是：
+
+    “先等满2秒，再执行”
+
+而是：
+
+    现在立刻尝试
+        ↓
+    现在能拿 -> 马上成功
+        ↓
+    现在拿不到 -> 阻塞等待
+        ↓
+    截止时间前锁可用 -> 可以提前成功
+        ↓
+    到截止时间仍未取得 -> 超时返回
+
+
+============================================================
+九、ETIMEDOUT —— 今天重点标记
+============================================================
+
+需要：
+
+    #include <errno.h>
+
+返回：
+
+    ret == 0
+
+表示：
+
+    成功取得锁
+
+返回：
+
+    ret == ETIMEDOUT
+
+表示：
+
+    已经到达指定的绝对截止时间，
+    但线程仍然没有取得这把读写锁。
+
+重点：
+
+    ETIMEDOUT = 超时
+
+如果：
+
+    ret == ETIMEDOUT
+
+那么：
+
+    当前线程没有持有这把锁
+
+所以不能调用：
+
+    pthread_rwlock_unlock(&rwlock);
+
+只有：
+
+    ret == 0
+
+真正成功获得锁后，才 unlock。
+
+
+============================================================
+十、struct timespec 和 ts 到底是什么
+============================================================
+
+代码：
+
+    struct timespec ts;
+
+这里：
+
+    struct timespec
+
+是系统头文件已经定义好的“结构体类型”。
+
+而：
+
+    ts
+
+只是我们自己定义的一个普通变量名。
+
+所以：
+
+    ts 不是系统变量
+    ts 不是宏
+    ts 不是时间函数
+
+它只是：
+
+    一个 struct timespec 类型的变量
+
+在 demo 中：
+
+    void *writer(void *arg)
+    {
+        struct timespec ts;
+        ...
+    }
+
+所以 ts 是：
+
+    writer() 线程函数内部的局部变量
+
+不是全局变量。
+
+真正取得当前时间的函数是：
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+它把当前时间写进 ts。
+
+
+============================================================
+十一、timespec 的两个主要成员
+============================================================
+
+概念：
+
+    struct timespec
+    {
+        time_t tv_sec;
+        long   tv_nsec;
+    };
+
+tv_sec：
+
+    整数秒部分
+
+tv_nsec：
+
+    当前这一秒中的纳秒部分
+
+换算：
+
+    1 秒 = 1,000,000,000 纳秒
+
+例：
+
+2 秒：
+
+    tv_sec  = 2
+    tv_nsec = 0
+
+0.6 秒：
+
+    tv_sec  = 0
+    tv_nsec = 600000000
+
+2.5 秒：
+
+    tv_sec  = 2
+    tv_nsec = 500000000
+
+5 纳秒：
+
+    tv_sec  = 0
+    tv_nsec = 5
+
+
+============================================================
+十二、timedwrlock 为什么不是直接传“2”
+============================================================
+
+timedwrlock 要的是：
+
+    绝对截止时间
+
+不是：
+
+    “等待2秒”这个相对时长数字
+
+所以：
+
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    ts.tv_sec += 2;
+
+    pthread_rwlock_timedwrlock(&rwlock, &ts);
+
+逻辑：
+
+    当前时间
+        +
+    2秒
+        =
+    最晚允许等待到的绝对时间点
+
+例如当前：
+
+    1000.3 秒
+
+加2秒：
+
+    1002.3 秒
+
+则 timedwrlock 的意思：
+
+    “现在开始申请写锁，
+     最晚只能等到 1002.3 秒这个时间点。”
+
+
+============================================================
+十三、时间相加与纳秒进位
+============================================================
+
+当前：
+
+    1000 秒 + 800000000 纳秒
+
+要加：
+
+    2 秒 + 500000000 纳秒
+
+分别相加：
+
+    秒：
+    1000 + 2 = 1002
+
+    纳秒：
+    800000000 + 500000000
+    = 1300000000
+
+因为：
+
+    1000000000 ns = 1 s
+
+所以：
+
+    1300000000 ns
+    =
+    1秒 + 300000000ns
+
+最终：
+
+    1003 秒 + 300000000 纳秒
+
+即：
+
+    1003.3 秒
+
+简单一次进位：
+
+    if (ts.tv_nsec >= 1000000000)
+    {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000;
+    }
+
+更通用的正规化：
+
+    ts.tv_sec += ts.tv_nsec / 1000000000;
+    ts.tv_nsec %= 1000000000;
+
+
+============================================================
+十四、关于 arg 和 ts
+============================================================
+
+线程入口：
+
+    void *writer(void *arg)
+
+如果创建线程：
+
+    pthread_create(&tid, NULL, writer, NULL);
+
+那么：
+
+    arg == NULL
+
+如果不用 arg：
+
+    (void)arg;
+
+即可。
+
+理论上：
+
+    struct timespec ts;
+
+也可以通过 pthread_create 的第四个参数传给线程。
+
+例如：
+
+    pthread_create(&tid, NULL, writer, &ts);
+
+在线程中：
+
+    struct timespec *p = arg;
+
+但是今天这个 timedwrlock demo 没必要这么做。
+
+原因：
+
+    我们希望在线程真正准备调用 timedwrlock 时，
+    再取得“这一刻”的当前时间，
+    然后计算：
+
+        当前时间 + 允许等待时长
+        = 截止时间
+
+所以直接在 writer() 内：
+
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    ts.tv_sec += 2;
+
+最直观。
+
+注意：
+今天用户最后确认到这里时，曾一度漏看了：
+
+    struct timespec ts;
+
+实际上 demo 里有定义 ts。
+它不是系统变量，而是 writer() 中的局部变量。
+
+
+============================================================
+十五、timedwrlock 最小 demo
+============================================================
+
+#define _XOPEN_SOURCE 700
+
+#include <stdio.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+#include <errno.h>
+
+pthread_rwlock_t rwlock;
+
+void *reader(void *arg)
+{
+    (void)arg;
+
+    pthread_rwlock_rdlock(&rwlock);
+
+    printf("A：拿到读锁，持有5秒\n");
+
+    sleep(5);
+
+    printf("A：释放读锁\n");
+
+    pthread_rwlock_unlock(&rwlock);
+
+    return NULL;
+}
+
+void *writer(void *arg)
+{
+    (void)arg;
+
+    struct timespec ts;   /* ts 在这里定义，是局部变量 */
+    int ret;
+
+    /*
+     * 教学演示：
+     * 尽量让 reader 先拿到读锁。
+     * sleep 只是为了制造容易观察的时序，
+     * 不是正式同步机制。
+     */
+    sleep(1);
+
+    printf("B：第一次申请写锁，最多等到“当前时间+2秒”\n");
+
+    /*
+     * 把当前绝对时间写入 ts。
+     */
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    /*
+     * 截止时间 = 当前时间 + 2秒
+     */
+    ts.tv_sec += 2;
+
+    ret = pthread_rwlock_timedwrlock(&rwlock, &ts);
+
+    if (ret == 0)
+    {
+        printf("B：第一次成功拿到写锁\n");
+
+        pthread_rwlock_unlock(&rwlock);
+    }
+    else if (ret == ETIMEDOUT)
+    {
+        /* ETIMEDOUT：到截止时间仍未取得锁 */
+        printf("B：第一次超时，没有拿到写锁\n");
+    }
+    else
+    {
+        printf("B：第一次出现其他错误，错误码=%d\n", ret);
+    }
+
+    printf("B：第二次申请写锁，最多等到“当前时间+4秒”\n");
+
+    /*
+     * 第二次重新取当前时间，
+     * 因为第二次需要新的绝对截止时间。
+     */
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    ts.tv_sec += 4;
+
+    ret = pthread_rwlock_timedwrlock(&rwlock, &ts);
+
+    if (ret == 0)
+    {
+        printf("B：第二次成功拿到写锁\n");
+
+        pthread_rwlock_unlock(&rwlock);
+    }
+    else if (ret == ETIMEDOUT)
+    {
+        /* ETIMEDOUT：第二次也到达截止时间仍未取得锁 */
+        printf("B：第二次也超时了\n");
+    }
+    else
+    {
+        printf("B：第二次出现其他错误，错误码=%d\n", ret);
+    }
+
+    return NULL;
+}
+
+int main(void)
+{
+    pthread_t tid_a;
+    pthread_t tid_b;
+
+    pthread_rwlock_init(&rwlock, NULL);
+
+    pthread_create(&tid_a, NULL, reader, NULL);
+    pthread_create(&tid_b, NULL, writer, NULL);
+
+    pthread_join(tid_a, NULL);
+    pthread_join(tid_b, NULL);
+
+    pthread_rwlock_destroy(&rwlock);
+
+    return 0;
+}
+
+编译：
+
+    gcc demo.c -o demo -pthread
+
+预期逻辑：
+
+第0秒左右：
+
+    A拿到读锁
+
+第1秒左右：
+
+    B第一次 timedwrlock
+    deadline = 当前时间 + 2秒
+
+第3秒左右：
+
+    A仍然持有读锁
+    B返回 ETIMEDOUT
+
+随后：
+
+    B重新获取当前时间
+    deadline = 当前时间 + 4秒
+    B第二次 timedwrlock
+
+第5秒左右：
+
+    A释放读锁
+
+因为第二次 deadline 还没到：
+
+    B可以成功拿到写锁
+
+结论：
+
+    timedwrlock 的时间参数
+    是“最晚允许等到哪个绝对时间点”
+
+    不是“必须等满几秒”。
+
+
+============================================================
+十六、今天最终收尾
+============================================================
+
+今天已经掌握：
+
+    rdlock / wrlock
+        ↓
+    tryrdlock / trywrlock
+        ↓
+    try失败不会自动重试
+        ↓
+    busy waiting
+        ↓
+    实时任务中“允许本周期失败/降级”的思路
+        ↓
+    timedrdlock / timedwrlock
+        ↓
+    struct timespec
+        ↓
+    tv_sec / tv_nsec
+        ↓
+    绝对截止时间
+        ↓
+    时间加法与纳秒进位
+        ↓
+    ETIMEDOUT
+        ↓
+    timedwrlock demo
+
+三个接口最终对比：
+
+    pthread_rwlock_wrlock()
+        拿不到 -> 等
+
+    pthread_rwlock_trywrlock()
+        拿不到 -> 立即返回
+
+    pthread_rwlock_timedwrlock()
+        拿不到 -> 最多等到指定的绝对截止时间
+
+下一次学习：
+
+    先快速复习以上三种语义，
+    然后把读写锁模块整体收尾，
+    再进入后续 Linux 多线程知识点。
