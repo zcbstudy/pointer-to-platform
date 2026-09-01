@@ -1,0 +1,992 @@
+demo38：POSIX 命名信号量 + 共享内存同步
+
+一、目标
+
+demo37：
+    共享内存负责“存数据”。
+
+demo38：
+    在共享内存上再加 semaphore，
+    负责“什么时候可以拿数据”。
+
+完整思想：
+
+    writer
+    ↓
+    先把数据写进共享内存
+    ↓
+    sem_post()
+    ↓
+    告诉消费者：现在有 1 份许可/资源可以拿
+
+    reader
+    ↓
+    sem_wait()
+    ↓
+    拿到许可后
+    ↓
+    再去共享内存读取真正的数据
+
+
+二、semaphore 本质
+
+semaphore 不是资源本体。
+
+可以理解成：
+
+    “可用资源数量 / 许可数量”的计数器
+    +
+    等待 / 唤醒机制
+
+例如：
+
+    sem = 3
+
+表示：
+    当前有 3 个许可可获取。
+
+sem_wait():
+
+    如果 sem > 0
+        sem - 1
+        当前进程继续
+
+    如果 sem == 0
+        当前进程阻塞
+
+sem_post():
+
+    sem + 1
+
+如果有人正在等待：
+    新产生的许可会让一个等待者获得继续执行的机会。
+
+
+三、真正资源在哪里
+
+真正资源可以是：
+
+    一帧图像
+    一个 buffer
+    一条任务
+    一个数据值
+    一个队列位置
+
+例如：
+
+    *shared = 100;
+
+这是“真正的数据”。
+
+然后：
+
+    sem_post(sem);
+
+表示：
+    数据已经准备好，
+    现在有一份许可可以被消费者拿。
+
+
+所以：
+
+    共享内存
+    = 数据通道
+
+    semaphore
+    = 同步 / 计数通道
+
+
+四、多个消费者争一个许可
+
+假设：
+
+    sem = 0
+
+B：
+    sem_wait()
+    → 阻塞
+
+C：
+    sem_wait()
+    → 阻塞
+
+D：
+    sem_wait()
+    → 阻塞
+
+A：
+
+    sem_post()
+
+只增加一个许可。
+
+于是：
+
+    B / C / D
+    ↓
+    争取这个许可
+    ↓
+    最终只有一个成功获得
+    ↓
+    它解除阻塞
+    ↓
+    其他继续阻塞
+
+所以：
+
+    post 1 次
+    → 1 个许可
+
+不是：
+
+    post 1 次
+    → 所有等待者都通过
+
+
+五、普通信号量和命名信号量
+
+demo32：
+
+    sem_t sem;
+
+    sem_init(&sem, 0, 0);
+
+    sem_wait(&sem);
+    sem_post(&sem);
+
+这里：
+
+    sem
+    = sem_t 对象
+
+    &sem
+    = sem_t *
+
+
+demo38：
+
+    sem_t *sem = sem_open(...);
+
+这里：
+
+    sem_open()
+    直接返回 sem_t *
+
+所以：
+
+    sem_wait(sem);
+    sem_post(sem);
+
+不能写：
+
+    sem_wait(&sem);
+
+因为 sem 本身已经是指针。
+
+
+六、sem_open()
+
+创建：
+
+    sem_t *sem = sem_open(
+        "/demo38_sem",
+        O_CREAT,
+        0666,
+        0
+    );
+
+参数：
+
+1. "/demo38_sem"
+   命名 semaphore 的名字
+
+2. O_CREAT
+   不存在就创建
+
+3. 0666
+   创建权限
+
+   0：
+       八进制标记
+
+   4：
+       read
+
+   2：
+       write
+
+   1：
+       execute
+
+   6 = 4 + 2 = rw-
+
+   所以：
+       0666 = rw-rw-rw-
+
+   最终权限还会受到 umask 影响。
+
+4. 0
+   初始许可计数
+
+例如：
+
+    sem_open(..., 0);
+
+初始：
+    sem = 0
+
+所以第一个：
+
+    sem_wait()
+
+会阻塞。
+
+
+如果：
+
+    sem_open(..., 3);
+
+则初始有 3 个许可：
+
+    3 → 2
+    2 → 1
+    1 → 0
+
+第 4 次 wait 才阻塞。
+
+
+七、sem_open() 返回值
+
+成功：
+
+    返回 sem_t *
+
+失败：
+
+    返回 SEM_FAILED
+
+因此：
+
+    if (sem == SEM_FAILED)
+    {
+        perror("sem_open");
+    }
+
+不是检查 NULL。
+
+
+八、sem_wait()
+
+    sem_wait(sem);
+
+作用：
+
+    获取一个许可。
+
+如果计数 > 0：
+
+    计数 -1
+    当前进程继续
+
+如果计数 == 0：
+
+    当前进程阻塞
+
+
+不需要自己先检查：
+
+    sem 是 1 还是 2。
+
+sem_wait() 已经负责：
+
+    检查
+    ↓
+    获取
+    ↓
+    减 1
+    ↓
+    必要时阻塞
+
+
+九、sem_post()
+
+    sem_post(sem);
+
+作用：
+
+    增加一个许可。
+
+概念上：
+
+    0 → 1
+    1 → 2
+    2 → 3
+
+重要：
+
+    不是资源自己自动让 sem +1。
+
+而是程序在确认真实资源已经准备好后，
+主动：
+
+    sem_post(sem);
+
+
+典型顺序：
+
+    *shared = 100;
+    sem_post(sem);
+
+即：
+
+    先写真正数据
+    ↓
+    再通知消费者
+
+
+十、sem_t 不是普通 int
+
+学习模型里可以把 semaphore
+理解成“内部有一个许可计数”。
+
+但严格来说：
+
+    sem_t
+
+不是普通 int。
+
+它是 POSIX 定义的同步对象类型。
+
+内部实现可能还维护：
+
+    许可状态
+    等待状态
+    其他实现信息
+
+因此不能：
+
+    *sem = 3;
+
+也不能把：
+
+    *sem
+
+直接当普通整数打印。
+
+
+十一、sem_getvalue()
+
+如果只是想观察当前计数：
+
+    int value;
+
+    sem_getvalue(sem, &value);
+
+然后：
+
+    printf("%d\n", value);
+
+它适合：
+
+    调试
+    观察
+
+不适合做核心同步判断。
+
+原因：
+
+    刚看到 value = 2
+    ↓
+    下一瞬间别的进程可能已经 wait
+    ↓
+    状态就变了
+
+真正同步直接用：
+
+    sem_wait()
+
+
+十二、为什么 sem_open 不需要 mmap
+
+shm_open：
+
+    创建 / 打开通用共享内存对象
+    ↓
+    返回 fd
+    ↓
+    ftruncate
+    ↓
+    mmap
+    ↓
+    得到通用共享数据空间
+
+
+sem_open：
+
+    创建 / 打开专用命名 semaphore
+    ↓
+    返回 sem_t *
+    ↓
+    直接 sem_wait / sem_post
+
+
+所以：
+
+    sem_open
+    不是另一种 shm_open。
+
+它创建的是：
+
+    命名同步对象
+
+不是：
+
+    让你随便存数据的通用共享内存。
+
+
+系统内部当然也需要存储和共享机制，
+只是这些细节被 semaphore 接口封装掉了。
+
+
+十三、也可以把 sem_t 放共享内存
+
+另一种合法方案：
+
+    struct Shared
+    {
+        sem_t sem;
+        int data;
+    };
+
+把这个结构体放进：
+
+    MAP_SHARED
+
+共享内存。
+
+然后：
+
+    sem_init(&p->sem, 1, 0);
+
+这里：
+
+    pshared = 1
+
+表示这个未命名 semaphore
+用于进程间共享。
+
+
+所以两种路线都成立：
+
+方案 A：
+
+    共享内存
+    ↓
+    放 sem_t
+    ↓
+    sem_init(..., pshared = 1, ...)
+
+方案 B：
+
+    sem_open("/demo38_sem", ...)
+    ↓
+    直接用命名 semaphore
+
+demo38 学的是方案 B。
+
+
+十四、sem_close()
+
+    sem_close(sem);
+
+作用：
+
+    当前进程不再使用这个命名 semaphore。
+
+例如：
+
+A：
+    sem_open("/demo38_sem")
+
+B：
+    sem_open("/demo38_sem")
+
+A：
+    sem_close(sem)
+
+结果：
+
+    A 不用了
+
+但是：
+
+    B 仍然可以继续：
+        sem_wait()
+        sem_post()
+
+
+所以：
+
+    sem_close()
+    ≠
+    删除整个 semaphore
+
+
+十五、sem_close 不是退出通知
+
+如果：
+
+    sem = 0
+
+B：
+    sem_wait()
+    → 阻塞
+
+C：
+    sem_wait()
+    → 阻塞
+
+A 是唯一生产者。
+
+如果 A：
+
+    sem_close()
+    ↓
+    退出
+
+并且以后没人：
+
+    sem_post()
+
+那么：
+
+    B / C
+    可能永远阻塞。
+
+
+所以：
+
+    sem_close()
+    只是资源清理
+
+不是：
+
+    “通知所有等待者退出”
+
+
+需要退出时应该另外设计：
+
+    finished 标志
+    stop 消息
+    额外 post
+    sem_timedwait
+    等机制
+
+
+十六、sem_unlink()
+
+    sem_unlink("/demo38_sem");
+
+作用：
+
+    删除命名 semaphore 的公共名字。
+
+
+原来：
+
+    "/demo38_sem"
+          ↓
+    命名 semaphore 对象
+
+unlink 后：
+
+    "/demo38_sem"
+
+这个名字被删除。
+
+
+新的进程以后不能再通过旧名字：
+
+    sem_open("/demo38_sem", 0)
+
+找到原对象。
+
+
+但是：
+
+已经 sem_open 成功的进程，
+仍然可以继续使用自己的 semaphore 引用。
+
+
+最终：
+
+    名字已经 sem_unlink
+    +
+    所有进程都 sem_close
+
+对象才最终被清理。
+
+
+十七、sem_close 和 sem_unlink 对比
+
+sem_close(sem):
+
+    当前进程：
+    “我不用了”
+
+sem_unlink("/demo38_sem"):
+
+    系统：
+    “这个公共名字删掉”
+
+
+十八、调度器模型
+
+可以设计：
+
+    A = 生产者
+    AA = 调度者
+    B / C = 消费者
+
+A：
+
+    生产资源
+    ↓
+    sem_post(sem_AA)
+
+AA：
+
+    sem_wait(sem_AA)
+    ↓
+    知道有一份资源
+    ↓
+    决定交给谁
+
+
+如果 B / C 共用：
+
+    sem_BC
+
+那么：
+
+    AA sem_post(sem_BC)
+    ↓
+    B / C 争取许可
+
+
+如果要明确只给 B：
+
+    sem_post(sem_B)
+
+如果只给 C：
+
+    sem_post(sem_C)
+
+
+十九、writer.c
+
+#include <stdio.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <semaphore.h>
+#include <unistd.h>
+
+int main(void)
+{
+    int fd = shm_open(
+        "/demo38_shm",
+        O_CREAT | O_RDWR,
+        0666
+    );
+
+    if (fd == -1)
+    {
+        perror("shm_open");
+        return 1;
+    }
+
+    if (ftruncate(fd, sizeof(int)) == -1)
+    {
+        perror("ftruncate");
+        close(fd);
+        return 1;
+    }
+
+    int *shared = mmap(
+        NULL,
+        sizeof(int),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+    if (shared == MAP_FAILED)
+    {
+        perror("mmap");
+        close(fd);
+        return 1;
+    }
+
+    sem_t *sem = sem_open(
+        "/demo38_sem",
+        O_CREAT,
+        0666,
+        0
+    );
+
+    if (sem == SEM_FAILED)
+    {
+        perror("sem_open");
+        munmap(shared, sizeof(int));
+        close(fd);
+        return 1;
+    }
+
+    *shared = 100;
+
+    printf("writer: produce %d\n", *shared);
+
+    sem_post(sem);
+
+    sem_close(sem);
+    munmap(shared, sizeof(int));
+    close(fd);
+
+    /*
+     * writer 不 unlink，
+     * reader 后面还要通过名字找到：
+     *
+     * /demo38_shm
+     * /demo38_sem
+     */
+
+    return 0;
+}
+
+
+二十、reader.c
+
+#include <stdio.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <semaphore.h>
+#include <unistd.h>
+
+int main(void)
+{
+    int fd = shm_open(
+        "/demo38_shm",
+        O_RDONLY,
+        0
+    );
+
+    if (fd == -1)
+    {
+        perror("shm_open");
+        return 1;
+    }
+
+    int *shared = mmap(
+        NULL,
+        sizeof(int),
+        PROT_READ,
+        MAP_SHARED,
+        fd,
+        0
+    );
+
+    if (shared == MAP_FAILED)
+    {
+        perror("mmap");
+        close(fd);
+        return 1;
+    }
+
+    sem_t *sem = sem_open(
+        "/demo38_sem",
+        0
+    );
+
+    if (sem == SEM_FAILED)
+    {
+        perror("sem_open");
+        munmap(shared, sizeof(int));
+        close(fd);
+        return 1;
+    }
+
+    sem_wait(sem);
+
+    printf("reader: get %d\n", *shared);
+
+    sem_close(sem);
+    munmap(shared, sizeof(int));
+    close(fd);
+
+    sem_unlink("/demo38_sem");
+    shm_unlink("/demo38_shm");
+
+    return 0;
+}
+
+
+二十一、完整执行链
+
+writer：
+
+    shm_open
+    ↓
+    ftruncate
+    ↓
+    mmap
+    ↓
+    sem_open
+    ↓
+    *shared = 100
+    ↓
+    sem_post
+    ↓
+    sem_close
+    ↓
+    munmap
+    ↓
+    close
+
+
+reader：
+
+    shm_open
+    ↓
+    mmap
+    ↓
+    sem_open
+    ↓
+    sem_wait
+    ↓
+    读取 *shared
+    ↓
+    sem_close
+    ↓
+    munmap
+    ↓
+    close
+    ↓
+    sem_unlink
+    ↓
+    shm_unlink
+
+
+二十二、编译运行
+
+编译：
+
+    gcc writer.c -o writer
+    gcc reader.c -o reader
+
+运行：
+
+    ./writer
+
+预期：
+
+    writer: produce 100
+
+然后：
+
+    ./reader
+
+预期：
+
+    reader: get 100
+
+
+二十三、本节新增 API
+
+1. sem_open()
+
+    创建 / 打开 POSIX 命名 semaphore
+
+    成功：
+        sem_t *
+
+    失败：
+        SEM_FAILED
+
+
+2. sem_close()
+
+    当前进程关闭自己的
+    命名 semaphore 使用入口
+
+
+3. sem_unlink()
+
+    删除命名 semaphore 的公共名字
+
+
+补充：
+
+4. sem_getvalue()
+
+    观察当前 semaphore 计数
+    更适合调试
+
+
+继续使用：
+
+    sem_wait()
+    sem_post()
+
+    shm_open()
+    ftruncate()
+    mmap()
+    munmap()
+    close()
+    shm_unlink()
+
+
+二十四、最重要的总结
+
+1.
+
+    semaphore 不是资源本体，
+    而是：
+    “许可数量计数 + 等待/唤醒机制”。
+
+
+2.
+
+    真正的数据放共享内存，
+    semaphore 负责同步。
+
+
+3.
+
+    sem_post()
+    → 增加一个许可
+
+    sem_wait()
+    → 获取一个许可
+    → 没许可就阻塞
+
+
+4.
+
+    sem_open()
+    → 按名字找到同一个命名 semaphore
+
+    sem_close()
+    → 当前进程不用了
+
+    sem_unlink()
+    → 删除公共名字
+
+
+5.
+
+    demo37：
+    解决共享数据
+
+    demo38：
+    在共享数据基础上补进程间同步
