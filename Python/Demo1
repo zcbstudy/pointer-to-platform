@@ -1,0 +1,20 @@
+print('hello world')
+print(1+2)
+#ctrl+/是快捷注释 再按一次解除注释
+#ctrl+d是复制上一行
+print(89+90)
+
+#demo1
+aa=20
+bb=30
+if aa > bb:
+    print('aa')
+cc=30
+print(cc)
+#以上是上课学习缩进的小动作 无实际代码意义
+#type类型
+print(type(aa))
+
+#字符串类型单引号双引号三引号
+#列表，元组，字典，集合我就不赘述了
+dd=["265545","acs0","""an""",False,8,20]
