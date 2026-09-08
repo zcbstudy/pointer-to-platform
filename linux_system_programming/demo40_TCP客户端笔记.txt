@@ -1,0 +1,754 @@
+RoadToEmbedded · linux学习2
+demo40：Linux TCP Socket 客户端
+日期：2026-09-04
+用途：第一轮复习笔记
+
+============================================================
+0. 本节主线
+============================================================
+
+客户端：
+
+socket()
+→ 创建自己的 TCP socket fd
+
+准备 struct sockaddr_in server_addr
+→ 填服务器 IPv4
+→ 填服务器端口
+→ 填服务器 IP
+
+inet_pton()
+→ 字符串 IP 转成二进制 IPv4 地址
+
+connect()
+→ 用客户端自己的 sockfd
+  去连接服务器 IP + port
+
+连接成功后：
+
+send()
+recv()
+
+最后：
+
+close(sockfd)
+
+
+和 demo39 服务端对比：
+
+服务端：
+socket
+→ bind
+→ listen
+→ accept
+→ client_fd
+→ recv/send
+
+客户端：
+socket
+→ server_addr
+→ inet_pton
+→ connect
+→ sockfd
+→ recv/send
+
+
+============================================================
+1. socket()
+============================================================
+
+典型：
+
+int sockfd = socket(
+    AF_INET,
+    SOCK_STREAM,
+    0
+);
+
+三个参数：
+
+AF_INET
+→ IPv4 地址族
+
+SOCK_STREAM
+→ 流式 socket
+→ TCP 使用
+
+0
+→ 让内核选择匹配前两个参数的默认协议
+→ 这里就是 TCP
+
+返回：
+
+sockfd >= 0
+→ 成功
+
+-1
+→ 失败
+
+检查：
+
+if (sockfd == -1)
+{
+    perror("socket");
+    return 1;
+}
+
+注意：
+
+客户端的 sockfd
+→ 是客户端进程自己的本地 fd
+
+不是：
+服务器的 sockfd
+
+客户端也看不到服务器进程内部的 fd。
+
+
+============================================================
+2. 为什么客户端通常不 bind()
+============================================================
+
+服务端：
+
+bind()
+→ 明确指定“我在哪”
+
+例如：
+
+192.168.1.10:8080
+
+因为客户端需要知道：
+去哪个 IP + port 找服务。
+
+普通客户端通常不手动 bind：
+
+因为客户端只需要：
+“我要连接谁”
+
+客户端自己的：
+本地 IP + 临时端口
+
+通常由内核自动选择。
+
+例如最终 TCP 连接可能是：
+
+客户端：
+192.168.1.20:52341
+
+↓
+
+服务器：
+192.168.1.10:8080
+
+其中：
+
+8080
+→ 服务端自己 bind 的固定端口
+
+52341
+→ 客户端通常由内核自动分配的临时端口
+
+更严谨：
+
+客户端不是“没有自己的 IP/端口”
+
+而是：
+通常不需要程序员手动指定
+→ 由内核根据路由和端口分配自动选择
+
+客户端也可以手动 bind，
+只是普通客户端通常没必要。
+
+
+============================================================
+3. struct sockaddr_in server_addr
+============================================================
+
+典型：
+
+struct sockaddr_in server_addr;
+
+它是：
+
+服务器地址盒子
+
+主要放：
+
+地址族
+服务器 IP
+服务器 port
+
+注意：
+
+这里不是描述客户端自己在哪。
+
+这里描述的是：
+
+“我要连接的服务器是谁”。
+
+
+============================================================
+4. memset()
+============================================================
+
+典型：
+
+memset(
+    &server_addr,
+    0,
+    sizeof(server_addr)
+);
+
+三个参数：
+
+&server_addr
+→ 从 server_addr 这块内存开始
+
+0
+→ 每个字节都填 0
+
+sizeof(server_addr)
+→ 一共填多少字节
+
+作用：
+
+把整个 server_addr 结构体清零。
+
+然后再填写需要的成员。
+
+
+============================================================
+5. 填地址族
+============================================================
+
+server_addr.sin_family = AF_INET;
+
+含义：
+
+这个服务器地址使用 IPv4。
+
+第一轮记：
+
+sin_family
+→ 地址族
+
+
+============================================================
+6. 填服务器端口
+============================================================
+
+server_addr.sin_port =
+    htons(8080);
+
+含义：
+
+服务器端口是 8080。
+
+htons：
+
+host to network short
+
+→ 主机字节序
+→ 网络字节序
+
+16 bit
+
+端口字段是 16 bit。
+
+
+============================================================
+7. inet_pton()
+============================================================
+
+典型：
+
+inet_pton(
+    AF_INET,
+    "127.0.0.1",
+    &server_addr.sin_addr
+);
+
+作用：
+
+把：
+
+"127.0.0.1"
+
+这种人类可读的字符串 IPv4 地址
+
+转换成：
+
+socket 地址结构里使用的二进制 IPv4 地址
+
+执行链：
+
+"127.0.0.1"
+→ inet_pton()
+→ 二进制 IPv4
+→ 写入 server_addr.sin_addr
+
+三个参数：
+
+AF_INET
+→ 我要转换 IPv4
+
+"127.0.0.1"
+→ 字符串形式服务器 IP
+
+&server_addr.sin_addr
+→ 转换结果写到哪里
+
+第一轮不要求死背：
+
+sin_addr
+
+只要记：
+
+server_addr 里的“IP 那一格”。
+
+返回：
+
+1
+→ 转换成功
+
+0
+→ IP 字符串格式不合法
+
+-1
+→ 参数/地址族等出错
+
+
+============================================================
+8. server_addr 完整准备顺序
+============================================================
+
+struct sockaddr_in server_addr;
+
+memset(
+    &server_addr,
+    0,
+    sizeof(server_addr)
+);
+
+server_addr.sin_family =
+    AF_INET;
+
+server_addr.sin_port =
+    htons(8080);
+
+inet_pton(
+    AF_INET,
+    "127.0.0.1",
+    &server_addr.sin_addr
+);
+
+准备完成后：
+
+server_addr 里已经有：
+
+IPv4
++
+服务器 IP
++
+服务器 port
+
+然后再 connect。
+
+
+============================================================
+9. connect()
+============================================================
+
+典型：
+
+if (connect(
+        sockfd,
+        (struct sockaddr *)&server_addr,
+        sizeof(server_addr)
+    ) == -1)
+{
+    perror("connect");
+    close(sockfd);
+    return 1;
+}
+
+作用：
+
+告诉内核：
+
+“使用客户端自己的 sockfd，
+去连接 server_addr 指定的服务器。”
+
+三个参数：
+
+sockfd
+→ 客户端自己的 socket fd
+
+(struct sockaddr *)&server_addr
+→ 要连接的服务器地址
+
+sizeof(server_addr)
+→ 服务器地址结构体的字节长度
+
+注意：
+
+这里的目标不是：
+
+服务器的 sockfd
+
+客户端根本不知道：
+
+服务器进程内部的 fd 是多少。
+
+客户端真正连接的是：
+
+服务器 IP + port
+
+例如：
+
+127.0.0.1:8080
+
+
+============================================================
+10. bind() 和 connect() 的区别
+============================================================
+
+bind()
+→ 我自己在哪
+
+connect()
+→ 我要连接谁
+
+服务端：
+
+socket
+→ bind
+→ listen
+→ accept
+
+客户端：
+
+socket
+→ 准备服务器地址
+→ connect
+
+
+============================================================
+11. connect 成功以后
+============================================================
+
+connect 成功：
+
+返回 0
+
+失败：
+
+返回 -1
+
+成功以后：
+
+客户端原来的 sockfd
+
+就代表：
+
+已经连接到服务器的 TCP socket。
+
+客户端：
+
+sockfd
+↕
+TCP
+↕
+服务端：
+client_fd
+
+服务端：
+
+accept()
+→ 得到 client_fd
+
+客户端：
+
+connect()
+→ 仍然使用原来的 sockfd
+
+
+============================================================
+12. 连接成功后的 send()/recv()
+============================================================
+
+客户端发送：
+
+ssize_t n = send(
+    sockfd,
+    msg,
+    strlen(msg),
+    0
+);
+
+客户端接收：
+
+char buf[128];
+
+n = recv(
+    sockfd,
+    buf,
+    sizeof(buf) - 1,
+    0
+);
+
+如果 n > 0：
+
+buf[n] = '\0';
+
+注意：
+
+send/recv 的语义和 demo39 相同。
+
+send 可能 partial send。
+recv 不保证一次拿到完整逻辑消息。
+recv 不自动补 '\0'。
+
+
+============================================================
+13. close()
+============================================================
+
+客户端通信结束：
+
+close(sockfd);
+
+含义：
+
+客户端程序不再使用这条 socket 连接。
+
+内核负责后续 TCP 关闭流程。
+
+
+============================================================
+14. demo40 完整代码
+============================================================
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int main(void)
+{
+    int sockfd = socket(
+        AF_INET,
+        SOCK_STREAM,
+        0
+    );
+
+    if (sockfd == -1)
+    {
+        perror("socket");
+        return 1;
+    }
+
+    struct sockaddr_in server_addr;
+
+    memset(
+        &server_addr,
+        0,
+        sizeof(server_addr)
+    );
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(8080);
+
+    int ret = inet_pton(
+        AF_INET,
+        "127.0.0.1",
+        &server_addr.sin_addr
+    );
+
+    if (ret != 1)
+    {
+        printf("inet_pton failed\n");
+        close(sockfd);
+        return 1;
+    }
+
+    if (connect(
+            sockfd,
+            (struct sockaddr *)&server_addr,
+            sizeof(server_addr)
+        ) == -1)
+    {
+        perror("connect");
+        close(sockfd);
+        return 1;
+    }
+
+    printf("connected to server\n");
+
+    char msg[] = "hello server";
+
+    ssize_t n = send(
+        sockfd,
+        msg,
+        strlen(msg),
+        0
+    );
+
+    if (n == -1)
+    {
+        perror("send");
+        close(sockfd);
+        return 1;
+    }
+
+    char buf[128];
+
+    n = recv(
+        sockfd,
+        buf,
+        sizeof(buf) - 1,
+        0
+    );
+
+    if (n > 0)
+    {
+        buf[n] = '\0';
+        printf("server: %s\n", buf);
+    }
+    else if (n == 0)
+    {
+        printf("server closed\n");
+    }
+    else
+    {
+        perror("recv");
+    }
+
+    close(sockfd);
+
+    return 0;
+}
+
+
+============================================================
+15. 本节必须自己说出来的 8 句话
+============================================================
+
+1.
+客户端 socket()
+→ 得到自己的 socket fd。
+
+2.
+AF_INET
+→ IPv4
+
+SOCK_STREAM
+→ TCP 用的流式 socket
+
+0
+→ 默认匹配协议
+
+3.
+普通客户端通常不用手动 bind。
+本地 IP + 临时端口通常由内核选择。
+
+4.
+server_addr
+→ 描述我要连接的服务器。
+
+5.
+memset(&server_addr, 0, sizeof(server_addr))
+→ 把整个地址结构清零。
+
+6.
+inet_pton()
+→ 字符串 IP 转二进制 IPv4
+→ 放入 server_addr 的 IP 字段。
+
+7.
+connect()
+→ 用客户端自己的 sockfd
+→ 连接服务器 IP + port。
+
+8.
+连接成功后：
+
+客户端用 sockfd
+
+服务端用 client_fd
+
+双方都可以 send / recv。
+
+
+============================================================
+16. demo39 / demo40 对照
+============================================================
+
+【服务端 demo39】
+
+socket
+→ bind
+→ listen
+→ accept
+→ client_fd
+→ recv/send
+
+【客户端 demo40】
+
+socket
+→ server_addr
+→ inet_pton
+→ connect
+→ sockfd
+→ send/recv
+
+
+============================================================
+17. 本节真正的新 API
+============================================================
+
+真正新增：
+
+inet_pton()
+connect()
+
+其他：
+
+socket
+sockaddr_in
+memset
+htons
+send
+recv
+close
+
+基本都是 demo39 已经出现过的。
+
+
+============================================================
+18. 当前学习边界
+============================================================
+
+正式学到：
+
+demo40 TCP 客户端
+
+尚未正式学习：
+
+inet_ntop
+shutdown
+sendto
+recvfrom
+getaddrinfo
+freeaddrinfo
+epoll_create1
+epoll_ctl
+epoll_wait
+
+
+============================================================
+END
+============================================================

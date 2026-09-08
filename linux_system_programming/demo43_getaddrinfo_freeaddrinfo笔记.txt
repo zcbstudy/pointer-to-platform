@@ -1,0 +1,801 @@
+RoadToEmbedded - Linux 网络编程
+demo43：getaddrinfo / freeaddrinfo 笔记
+
+一、这节解决什么问题
+
+以前 TCP 客户端常直接写具体 IP：
+
+    inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
+
+但真实程序经常拿到的是域名：
+
+    example.com
+    github.com
+
+所以需要：
+
+    getaddrinfo()
+
+它把：
+
+    域名 + 端口 + 筛选规则
+
+转换成：
+
+    一组可以直接给 socket()/connect() 使用的候选地址信息。
+
+注意：
+getaddrinfo() 不只是“返回一个 IP 字符串”，
+而是返回一条 struct addrinfo 候选链表。
+
+
+==================================================
+二、核心调用
+==================================================
+
+    struct addrinfo hints;
+    struct addrinfo *result;
+
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int ret = getaddrinfo(
+        "example.com",
+        "80",
+        &hints,
+        &result
+    );
+
+四个参数：
+
+    "example.com"
+        → 域名 / 主机名
+
+    "80"
+        → 服务名 / 端口号字符串
+
+    &hints
+        → 筛选规则
+        → 我想要什么类型的地址
+
+    &result
+        → 输出参数
+        → 把候选地址链表头写到 result 里
+
+
+一句话：
+
+    getaddrinfo(
+        域名,
+        端口,
+        筛选规则,
+        输出结果链表
+    );
+
+
+==================================================
+三、为什么是 &result
+==================================================
+
+定义：
+
+    struct addrinfo *result;
+
+成功后：
+
+    result
+      ↓
+    [候选1] -> [候选2] -> [候选3] -> NULL
+
+getaddrinfo() 要修改 result 这个指针变量本身，
+所以传：
+
+    &result
+
+本质仍然是“输出参数”：
+
+    函数要修改外部变量
+        → 传这个变量的地址
+
+
+==================================================
+四、hints 是什么
+==================================================
+
+hints 可以理解成：
+
+    规则单 / 筛选条件
+
+常见：
+
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+
+1. ai_family
+
+    AF_UNSPEC
+        → IPv4 / IPv6 都可以
+
+    AF_INET
+        → 只要 IPv4
+
+    AF_INET6
+        → 只要 IPv6
+
+
+2. ai_socktype
+
+    SOCK_STREAM
+        → 流式 socket
+        → TCP
+
+    SOCK_DGRAM
+        → 数据报 socket
+        → UDP
+
+
+所以：
+
+    ai_family
+        → IPv4 / IPv6 怎么筛
+
+    ai_socktype
+        → TCP / UDP 怎么筛
+
+
+==================================================
+五、result 是候选地址链表
+==================================================
+
+一个域名可能对应多个候选地址：
+
+    result
+      ↓
+    [地址1]
+      ↓
+    [地址2]
+      ↓
+    [地址3]
+      ↓
+    NULL
+
+程序通常一个个尝试：
+
+    候选1
+        → connect
+        → 失败
+
+    候选2
+        → connect
+        → 失败
+
+    候选3
+        → connect
+        → 成功
+        → 停止
+
+
+==================================================
+六、struct addrinfo 重点成员
+==================================================
+
+第一轮不要求死记成员名，只要认得。
+
+常见成员：
+
+    ai_family
+        → IPv4 / IPv6
+
+    ai_socktype
+        → SOCK_STREAM / SOCK_DGRAM
+
+    ai_protocol
+        → 协议信息
+
+    ai_addr
+        → 真正的 socket 地址
+
+    ai_addrlen
+        → 地址长度
+
+    ai_next
+        → 下一个候选节点
+
+
+最关键的连接形式：
+
+    connect(
+        sockfd,
+        p->ai_addr,
+        p->ai_addrlen
+    );
+
+
+==================================================
+七、遍历候选链表
+==================================================
+
+    struct addrinfo *p;
+
+    for (
+        p = result;
+        p != NULL;
+        p = p->ai_next
+    )
+    {
+        ...
+    }
+
+解释：
+
+    p = result
+        → 从第一个候选开始
+
+    p != NULL
+        → 还有候选就继续
+
+    p = p->ai_next
+        → 去下一个候选
+
+
+本质和以前链表：
+
+    p = p->next;
+
+完全同一种思路。
+
+
+==================================================
+八、循环中怎么连接
+==================================================
+
+    for (p = result; p != NULL; p = p->ai_next)
+    {
+        sockfd = socket(
+            p->ai_family,
+            p->ai_socktype,
+            p->ai_protocol
+        );
+
+        if (sockfd == -1)
+        {
+            continue;
+        }
+
+        if (connect(
+                sockfd,
+                p->ai_addr,
+                p->ai_addrlen
+            ) == 0)
+        {
+            break;
+        }
+
+        close(sockfd);
+        sockfd = -1;
+    }
+
+
+执行链：
+
+    拿候选1
+        ↓
+    socket()
+        ↓
+    connect()
+        ↓
+    失败
+        ↓
+    close(sockfd)
+        ↓
+    下一个候选
+
+成功：
+
+    connect(...) == 0
+        ↓
+    break
+
+
+==================================================
+九、为什么 socket() 参数直接用 p 里的数据
+==================================================
+
+以前：
+
+    socket(AF_INET, SOCK_STREAM, 0);
+
+现在：
+
+    socket(
+        p->ai_family,
+        p->ai_socktype,
+        p->ai_protocol
+    );
+
+因为 getaddrinfo() 已经把当前候选对应的：
+
+    地址族
+    socket 类型
+    协议
+
+准备好了。
+
+
+==================================================
+十、freeaddrinfo()
+==================================================
+
+    freeaddrinfo(result);
+
+作用：
+
+    释放 getaddrinfo() 创建出来的整条候选地址链表。
+
+可以直接理解成：
+
+    result
+      ↓
+    [节点1] -> [节点2] -> [节点3] -> NULL
+
+    freeaddrinfo(result)
+        → 整条链表释放
+
+
+不要自己：
+
+    free(result);
+
+因为这条链表是 getaddrinfo() 内部创建的，
+应使用配套接口释放。
+
+记忆：
+
+    getaddrinfo()
+        ↕
+    freeaddrinfo()
+
+
+==================================================
+十一、freeaddrinfo 和 close 的区别
+==================================================
+
+    freeaddrinfo(result)
+        → 释放地址解析结果链表
+
+    close(sockfd)
+        → 关闭 socket fd
+
+不是一个东西。
+
+
+==================================================
+十二、错误处理：gai_strerror 和 perror
+==================================================
+
+普通 Linux/socket 系统调用常见：
+
+    socket()
+    bind()
+    connect()
+    send()
+    recv()
+
+失败通常：
+
+    返回 -1
+        ↓
+    errno
+        ↓
+    perror()
+
+
+例如：
+
+    if (sockfd == -1)
+    {
+        perror("socket");
+    }
+
+
+getaddrinfo() 不同：
+
+    int ret = getaddrinfo(...);
+
+    if (ret != 0)
+    {
+        printf(
+            "getaddrinfo: %s\n",
+            gai_strerror(ret)
+        );
+    }
+
+
+这里：
+
+    ret
+        → getaddrinfo 自己返回的错误码
+
+    gai_strerror(ret)
+        → 把错误码翻译成人能看的文字
+
+
+可以类比：
+
+    普通 Linux 系统调用：
+        errno + perror()
+
+    getaddrinfo：
+        ret + gai_strerror()
+
+
+作用上类似，
+但不是同一套错误机制。
+
+
+==================================================
+十三、完整 demo43
+==================================================
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
+int main(void)
+{
+    struct addrinfo hints;
+    struct addrinfo *result;
+    struct addrinfo *p;
+
+    int sockfd = -1;
+
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int ret = getaddrinfo(
+        "example.com",
+        "80",
+        &hints,
+        &result
+    );
+
+    if (ret != 0)
+    {
+        printf(
+            "getaddrinfo: %s\n",
+            gai_strerror(ret)
+        );
+
+        return 1;
+    }
+
+    for (
+        p = result;
+        p != NULL;
+        p = p->ai_next
+    )
+    {
+        sockfd = socket(
+            p->ai_family,
+            p->ai_socktype,
+            p->ai_protocol
+        );
+
+        if (sockfd == -1)
+        {
+            continue;
+        }
+
+        if (connect(
+                sockfd,
+                p->ai_addr,
+                p->ai_addrlen
+            ) == 0)
+        {
+            break;
+        }
+
+        close(sockfd);
+        sockfd = -1;
+    }
+
+    freeaddrinfo(result);
+
+    if (p == NULL)
+    {
+        printf("connect failed\n");
+        return 1;
+    }
+
+    printf("connected\n");
+
+    char msg[] =
+        "GET / HTTP/1.0\r\n\r\n";
+
+    if (send(
+            sockfd,
+            msg,
+            strlen(msg),
+            0
+        ) == -1)
+    {
+        perror("send");
+        close(sockfd);
+        return 1;
+    }
+
+    char buf[1024];
+
+    ssize_t n = recv(
+        sockfd,
+        buf,
+        sizeof(buf) - 1,
+        0
+    );
+
+    if (n > 0)
+    {
+        buf[n] = '\0';
+        printf("%s\n", buf);
+    }
+    else if (n == 0)
+    {
+        printf("server closed\n");
+    }
+    else
+    {
+        perror("recv");
+    }
+
+    close(sockfd);
+
+    return 0;
+}
+
+
+==================================================
+十四、完整执行链
+==================================================
+
+    准备 hints
+        ↓
+    getaddrinfo(
+        域名,
+        端口,
+        &hints,
+        &result
+    )
+        ↓
+    得到候选地址链表
+        ↓
+    p = result
+        ↓
+    遍历候选
+        ↓
+    socket(
+        p->ai_family,
+        p->ai_socktype,
+        p->ai_protocol
+    )
+        ↓
+    connect(
+        sockfd,
+        p->ai_addr,
+        p->ai_addrlen
+    )
+        ↓
+    失败
+        → close(sockfd)
+        → 下一个候选
+
+    成功
+        → break
+        ↓
+    freeaddrinfo(result)
+        ↓
+    send / recv
+        ↓
+    close(sockfd)
+
+
+==================================================
+十五、和以前手写 sockaddr_in 的区别
+==================================================
+
+以前：
+
+    socket()
+        ↓
+    自己准备 sockaddr_in
+        ↓
+    sin_family
+    sin_port
+    inet_pton(...)
+        ↓
+    connect(...)
+
+
+现在：
+
+    准备 hints
+        ↓
+    getaddrinfo()
+        ↓
+    得到 addrinfo 候选链表
+        ↓
+    socket(
+        p->ai_family,
+        p->ai_socktype,
+        p->ai_protocol
+    )
+        ↓
+    connect(
+        sockfd,
+        p->ai_addr,
+        p->ai_addrlen
+    )
+
+
+核心变化：
+
+以前：
+    自己拿具体 IP，自己组 sockaddr_in。
+
+现在：
+    给域名和规则，
+    getaddrinfo 帮你准备一组可连接候选地址。
+
+
+==================================================
+十六、TCP / UDP 都能用
+==================================================
+
+getaddrinfo() 不是 TCP 专属。
+
+TCP：
+
+    hints.ai_socktype = SOCK_STREAM;
+
+UDP：
+
+    hints.ai_socktype = SOCK_DGRAM;
+
+它本质负责：
+
+    地址解析 + 地址结构准备
+
+
+==================================================
+十七、本节最容易错的地方
+==================================================
+
+1.
+错误：
+    getaddrinfo 只是把域名转换成一个 IP 字符串。
+
+正确：
+    它返回一组 struct addrinfo 候选地址信息。
+
+
+2.
+错误：
+    &hints 是结果。
+
+正确：
+    &hints
+        → 输入筛选规则
+
+    &result
+        → 输出候选链表
+
+
+3.
+错误：
+    result 是数组。
+
+正确：
+    result 指向 addrinfo 链表。
+
+
+4.
+错误：
+    freeaddrinfo(result) 是关闭 socket。
+
+正确：
+    freeaddrinfo(result)
+        → 释放地址链表
+
+    close(sockfd)
+        → 关闭 socket fd
+
+
+5.
+错误：
+    getaddrinfo 失败直接 perror。
+
+第一轮正确记法：
+
+    ret = getaddrinfo(...);
+
+    if (ret != 0)
+    {
+        printf("%s\n", gai_strerror(ret));
+    }
+
+
+==================================================
+十八、第一轮必须掌握
+==================================================
+
+1. getaddrinfo 为什么存在。
+
+2. 四个参数：
+
+       域名
+       端口
+       hints
+       result
+
+3. hints 是筛选规则。
+
+4. result 是候选地址链表。
+
+5. p->ai_next 是下一个候选。
+
+6. 当前候选信息可直接用于：
+
+       socket(
+           p->ai_family,
+           p->ai_socktype,
+           p->ai_protocol
+       );
+
+7. 地址直接用于：
+
+       connect(
+           sockfd,
+           p->ai_addr,
+           p->ai_addrlen
+       );
+
+8. 失败：
+       close(sockfd)
+       → 下一个候选
+
+9. 成功：
+       break
+
+10. 配对：
+       getaddrinfo()
+           ↕
+       freeaddrinfo()
+
+11. 错误处理：
+       普通系统调用：
+           errno + perror()
+
+       getaddrinfo：
+           ret + gai_strerror()
+
+
+==================================================
+十九、一句话总结
+==================================================
+
+getaddrinfo()：
+
+    把“域名 + 端口 + 筛选规则”
+    变成“一条可用于 socket/connect 的候选地址链表”。
+
+程序：
+
+    一个候选一个候选地尝试，
+    成功就停，
+    最后 freeaddrinfo() 释放整条链表。

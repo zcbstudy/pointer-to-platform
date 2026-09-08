@@ -1,0 +1,861 @@
+RoadToEmbedded · linux学习2
+demo42：UDP Socket 编程
+日期：2026-09-07
+
+============================================================
+0. 本节主线
+============================================================
+
+UDP 服务端：
+socket()
+→ bind()
+→ recvfrom()
+→ sendto()
+→ close()
+
+UDP 客户端：
+socket()
+→ 准备 server_addr
+→ sendto()
+→ recvfrom()
+→ close()
+
+核心区别：
+
+TCP：
+SOCK_STREAM
+send / recv
+有连接
+
+UDP：
+SOCK_DGRAM
+sendto / recvfrom
+无连接
+
+
+============================================================
+1. UDP socket()
+============================================================
+
+int sockfd = socket(
+    AF_INET,
+    SOCK_DGRAM,
+    0
+);
+
+AF_INET
+→ IPv4
+
+SOCK_DGRAM
+→ 数据报 socket
+→ UDP
+
+0
+→ 默认匹配协议
+→ 这里就是 UDP
+
+返回：
+>= 0 成功，得到 fd
+-1 失败
+
+
+和 TCP 对比：
+
+TCP：
+socket(AF_INET, SOCK_STREAM, 0);
+
+UDP：
+socket(AF_INET, SOCK_DGRAM, 0);
+
+
+============================================================
+2. UDP 与 TCP 模型
+============================================================
+
+TCP：
+有连接
+可靠传输
+保序
+丢失会重传
+字节流
+
+UDP：
+无连接
+不保证可靠到达
+不保证顺序
+不负责重传
+按数据报传输
+
+注意：
+UDP 不是“完全不在乎数据完整”，而是协议本身不提供 TCP 那种可靠到达、重传和顺序保证。
+
+
+============================================================
+3. UDP 服务端为什么仍然 bind()
+============================================================
+
+服务端必须有固定 IP + port，别人才能把数据报发过来。
+
+struct sockaddr_in server_addr;
+
+memset(
+    &server_addr,
+    0,
+    sizeof(server_addr)
+);
+
+server_addr.sin_family = AF_INET;
+server_addr.sin_port = htons(8888);
+server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+bind(
+    sockfd,
+    (struct sockaddr *)&server_addr,
+    sizeof(server_addr)
+);
+
+bind()
+→ 把 UDP socket 固定到本机 IP + port。
+
+
+============================================================
+4. 为什么 UDP 没有 listen / accept
+============================================================
+
+TCP：
+socket
+→ bind
+→ listen
+→ accept
+→ client_fd
+
+accept() 后的 client_fd 已经代表某一个固定客户端连接。
+
+UDP：
+没有连接
+→ 不需要 listen()
+→ 不需要 accept()
+
+bind 后直接：
+recvfrom()
+
+
+============================================================
+5. recvfrom()
+============================================================
+
+char buf[128];
+
+struct sockaddr_in client_addr;
+socklen_t client_len = sizeof(client_addr);
+
+ssize_t n = recvfrom(
+    sockfd,
+    buf,
+    sizeof(buf) - 1,
+    0,
+    (struct sockaddr *)&client_addr,
+    &client_len
+);
+
+作用：
+收 UDP 数据
++
+顺便得到“是谁发来的”。
+
+
+参数：
+
+sockfd
+→ 哪个 UDP socket
+
+buf
+→ 数据放哪里
+
+sizeof(buf) - 1
+→ 最多收多少字节
+
+0
+→ 默认 flags
+
+(struct sockaddr *)&client_addr
+→ 来源地址
+→ 内核把发送方 IP + port 写这里
+
+&client_len
+→ 地址长度
+→ 输入 + 输出参数
+
+
+============================================================
+6. client_len 为什么先定义
+============================================================
+
+struct sockaddr_in client_addr;
+
+socklen_t client_len =
+    sizeof(client_addr);
+
+调用前：
+
+client_len
+→ 告诉内核 client_addr 缓冲区有多大
+
+调用后：
+
+内核可以把实际来源地址长度写回 client_len
+
+所以 recvfrom() 里传：
+
+&client_len
+
+因为内核需要修改它。
+
+
+============================================================
+7. recv() 与 recvfrom() 横向对比
+============================================================
+
+TCP：
+
+recv(
+    client_fd,
+    buf,
+    len,
+    0
+);
+
+client_fd
+→ 已经代表某一个已连接客户端
+→ 不需要再问“谁发来的”
+
+
+UDP：
+
+recvfrom(
+    sockfd,
+    buf,
+    len,
+    0,
+    来源地址,
+    &来源地址长度
+);
+
+sockfd
+→ 只是 UDP socket
+→ 不固定属于某个客户端
+
+所以：
+
+recv()
+= 收数据
+
+recvfrom()
+= 收数据 + 从哪里来
+
+
+============================================================
+8. sendto()
+============================================================
+
+ssize_t n = sendto(
+    sockfd,
+    buf,
+    len,
+    0,
+    (struct sockaddr *)&client_addr,
+    client_len
+);
+
+作用：
+发 UDP 数据
++
+明确指定目的地址。
+
+
+参数：
+
+sockfd
+→ 用哪个 UDP socket
+
+buf
+→ 发什么
+
+len
+→ 发多少字节
+
+0
+→ 默认 flags
+
+(struct sockaddr *)&client_addr
+→ 目的地址
+→ 发给谁
+
+client_len
+→ 目的地址长度
+
+
+============================================================
+9. sendto 为什么不是 &client_len
+============================================================
+
+recvfrom(..., &client_len)
+
+→ client_len 是输入 + 输出
+→ 内核需要写回
+
+
+sendto(..., client_len)
+
+→ 只需要告诉内核地址长度是多少
+→ 内核不需要修改它
+
+
+============================================================
+10. send() 与 sendto() 横向对比
+============================================================
+
+TCP：
+
+send(
+    fd,
+    buf,
+    len,
+    0
+);
+
+fd 已经知道固定对端是谁。
+
+
+UDP：
+
+sendto(
+    fd,
+    buf,
+    len,
+    0,
+    目的地址,
+    目的地址长度
+);
+
+UDP 无连接，
+所以每次发送都要告诉内核“发给谁”。
+
+所以：
+
+send()
+= 发
+
+sendto()
+= 发 + 去哪里
+
+
+============================================================
+11. 四个函数横向对比
+============================================================
+
+TCP 发送：
+
+send(
+    fd,
+    buf,
+    len,
+    0
+);
+
+TCP 接收：
+
+recv(
+    fd,
+    buf,
+    len,
+    0
+);
+
+
+UDP 发送：
+
+sendto(
+    fd,
+    buf,
+    len,
+    0,
+    目的地址,
+    目的地址长度
+);
+
+UDP 接收：
+
+recvfrom(
+    fd,
+    buf,
+    len,
+    0,
+    来源地址,
+    &来源地址长度
+);
+
+
+记忆：
+
+TCP：
+TX → send
+RX → recv
+
+UDP：
+TX → sendto
+RX → recvfrom
+
+
+最重要公式：
+
+send
+→ 发
+
+recv
+→ 收
+
+sendto
+→ 发 + 去哪里
+
+recvfrom
+→ 收 + 从哪里来
+
+
+============================================================
+12. 客户端和服务端都能收发
+============================================================
+
+不是：
+
+recv 只给客户端
+send 只给服务端
+
+而是：
+
+TCP 客户端：
+send → 发给服务器
+recv → 收服务器
+
+TCP 服务端：
+recv → 收客户端
+send → 回客户端
+
+UDP 客户端：
+sendto → 发给服务器
+recvfrom → 收服务器
+
+UDP 服务端：
+recvfrom → 收客户端
+sendto → 回客户端
+
+
+============================================================
+13. UDP 服务端逻辑
+============================================================
+
+1.
+socket(AF_INET, SOCK_DGRAM, 0)
+
+2.
+准备 server_addr
+
+3.
+bind(sockfd, ...)
+
+4.
+准备：
+
+struct sockaddr_in client_addr;
+socklen_t client_len = sizeof(client_addr);
+
+5.
+recvfrom(
+    sockfd,
+    buf,
+    len,
+    0,
+    (struct sockaddr *)&client_addr,
+    &client_len
+);
+
+此时：
+
+buf
+→ 客户端发来的数据
+
+client_addr
+→ 客户端来源 IP + port
+
+6.
+sendto(
+    sockfd,
+    buf,
+    len,
+    0,
+    (struct sockaddr *)&client_addr,
+    client_len
+);
+
+→ 回给刚才那个客户端
+
+
+============================================================
+14. UDP 客户端逻辑
+============================================================
+
+客户端一开始就知道服务器地址：
+
+struct sockaddr_in server_addr;
+
+所以发送：
+
+sendto(
+    sockfd,
+    buf,
+    len,
+    0,
+    (struct sockaddr *)&server_addr,
+    sizeof(server_addr)
+);
+
+→ 目的地址就是服务器。
+
+
+接收服务器回复：
+
+struct sockaddr_in from_addr;
+socklen_t from_len = sizeof(from_addr);
+
+recvfrom(
+    sockfd,
+    buf,
+    sizeof(buf) - 1,
+    0,
+    (struct sockaddr *)&from_addr,
+    &from_len
+);
+
+如果还要继续给服务器发：
+通常继续用原来保存的 server_addr 即可。
+
+
+============================================================
+15. 目的地址 / 来源地址
+============================================================
+
+sendto() 最后两个参数：
+
+目的地址
++
+目的地址长度
+
+
+recvfrom() 最后两个参数：
+
+来源地址
++
+来源地址长度
+
+
+直接记：
+
+TO
+→ 去哪里
+
+FROM
+→ 从哪里来
+
+
+============================================================
+16. UDP 服务端最小完整代码
+============================================================
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int main(void)
+{
+    int sockfd = socket(
+        AF_INET,
+        SOCK_DGRAM,
+        0
+    );
+
+    if (sockfd == -1)
+    {
+        perror("socket");
+        return 1;
+    }
+
+    struct sockaddr_in server_addr;
+
+    memset(
+        &server_addr,
+        0,
+        sizeof(server_addr)
+    );
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(8888);
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(
+            sockfd,
+            (struct sockaddr *)&server_addr,
+            sizeof(server_addr)
+        ) == -1)
+    {
+        perror("bind");
+        close(sockfd);
+        return 1;
+    }
+
+    char buf[128];
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    ssize_t n = recvfrom(
+        sockfd,
+        buf,
+        sizeof(buf) - 1,
+        0,
+        (struct sockaddr *)&client_addr,
+        &client_len
+    );
+
+    if (n > 0)
+    {
+        buf[n] = '\0';
+
+        printf("recv: %s\n", buf);
+
+        if (sendto(
+                sockfd,
+                buf,
+                n,
+                0,
+                (struct sockaddr *)&client_addr,
+                client_len
+            ) == -1)
+        {
+            perror("sendto");
+        }
+    }
+    else if (n == -1)
+    {
+        perror("recvfrom");
+    }
+
+    close(sockfd);
+
+    return 0;
+}
+
+
+============================================================
+17. UDP 客户端最小完整代码
+============================================================
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int main(void)
+{
+    int sockfd = socket(
+        AF_INET,
+        SOCK_DGRAM,
+        0
+    );
+
+    if (sockfd == -1)
+    {
+        perror("socket");
+        return 1;
+    }
+
+    struct sockaddr_in server_addr;
+
+    memset(
+        &server_addr,
+        0,
+        sizeof(server_addr)
+    );
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(8888);
+
+    if (inet_pton(
+            AF_INET,
+            "127.0.0.1",
+            &server_addr.sin_addr
+        ) != 1)
+    {
+        printf("inet_pton failed\n");
+        close(sockfd);
+        return 1;
+    }
+
+    char msg[] = "hello udp";
+
+    if (sendto(
+            sockfd,
+            msg,
+            strlen(msg),
+            0,
+            (struct sockaddr *)&server_addr,
+            sizeof(server_addr)
+        ) == -1)
+    {
+        perror("sendto");
+        close(sockfd);
+        return 1;
+    }
+
+    char buf[128];
+
+    struct sockaddr_in from_addr;
+    socklen_t from_len = sizeof(from_addr);
+
+    ssize_t n = recvfrom(
+        sockfd,
+        buf,
+        sizeof(buf) - 1,
+        0,
+        (struct sockaddr *)&from_addr,
+        &from_len
+    );
+
+    if (n > 0)
+    {
+        buf[n] = '\0';
+        printf("server: %s\n", buf);
+    }
+    else if (n == -1)
+    {
+        perror("recvfrom");
+    }
+
+    close(sockfd);
+
+    return 0;
+}
+
+
+============================================================
+18. 本节必须自己说出来的 10 句话
+============================================================
+
+1.
+UDP：
+socket(AF_INET, SOCK_DGRAM, 0)
+
+2.
+TCP：
+SOCK_STREAM
+
+UDP：
+SOCK_DGRAM
+
+3.
+UDP 无连接，
+所以服务端没有 listen / accept。
+
+4.
+UDP 服务端：
+socket → bind → recvfrom → sendto
+
+5.
+UDP 客户端：
+socket → sendto → recvfrom
+
+6.
+sendto：
+发数据 + 目的地址
+
+7.
+recvfrom：
+收数据 + 来源地址
+
+8.
+recvfrom 用 &client_len，
+因为内核要写回实际地址长度。
+
+9.
+sendto 用 client_len，
+因为内核只读取这个长度。
+
+10.
+TCP：
+send / recv
+
+UDP：
+sendto / recvfrom
+
+
+============================================================
+19. 返回值速查
+============================================================
+
+socket()
+成功：fd >= 0
+失败：-1
+
+bind()
+成功：0
+失败：-1
+
+recvfrom()
+成功：>= 0，实际收到字节数
+失败：-1
+
+sendto()
+成功：>= 0，实际接受用于发送的字节数
+失败：-1
+
+close()
+成功：0
+失败：-1
+
+
+============================================================
+20. 当前进度
+============================================================
+
+正式完成：
+demo42 UDP
+
+当前网络已学：
+
+TCP 服务端
+TCP 客户端
+inet_pton
+inet_ntop
+shutdown
+UDP socket
+UDP bind
+sendto
+recvfrom
+
+下一步预计：
+
+demo43
+→ getaddrinfo()
+→ freeaddrinfo()
+
+后续：
+epoll
+
+
+============================================================
+END
+============================================================
