@@ -1,0 +1,1430 @@
+RoadToEmbedded - Linux 网络编程
+demo44：epoll 多连接事件监听
+
+==================================================
+一、本节核心目标
+==================================================
+
+前面 TCP 服务端已经会：
+
+    socket()
+    bind()
+    listen()
+    accept()
+    recv()
+    send()
+    close()
+
+问题出现在：一个线程要管理很多 client_fd。
+
+例如：
+
+    recv(fd4, ...);
+    recv(fd5, ...);
+    recv(fd6, ...);
+
+如果 fd4 当前没有数据，默认阻塞 recv() 可能让这个线程卡在 fd4。
+即使 fd5、fd6 已经有数据，这个线程也还没有执行到后面。
+
+注意：
+    不是“连接卡住”
+    而是“调用阻塞 recv() 的线程卡住”。
+
+因此需要 epoll：
+
+    很多 fd
+      ↓
+    交给 epoll 监视
+      ↓
+    哪些 fd 当前发生事件
+      ↓
+    epoll_wait() 返回这些事件
+      ↓
+    线程再调用 accept()/recv()/send() 真正处理
+
+一句话：
+
+    epoll = 找出“谁现在值得处理”
+    accept/recv/send = 真正完成 I/O
+
+
+==================================================
+二、一个端口为什么能接很多客户端
+==================================================
+
+服务器：
+
+    192.168.1.100:8080
+
+多个客户端可以同时连接：
+
+    192.168.1.10:50001  -> 192.168.1.100:8080
+    192.168.1.20:50002  -> 192.168.1.100:8080
+    192.168.1.30:50003  -> 192.168.1.100:8080
+
+TCP 连接可由四元组区分：
+
+    客户端 IP
+    客户端端口
+    服务器 IP
+    服务器端口
+
+8080 是服务器统一入口，不是只能给一个客户端使用。
+
+监听 socket：
+
+    listen_fd
+
+每次 accept() 一个客户端，会得到一个新的 client_fd：
+
+    listen_fd
+      ├── client_fd = 5
+      ├── client_fd = 6
+      └── client_fd = 7
+
+
+==================================================
+三、连接、fd、线程、epoll 不要混
+==================================================
+
+    TCP 连接
+        → 一条网络连接
+
+    client_fd
+        → 当前进程访问这条连接的文件描述符
+
+    线程
+        → 执行代码的执行流
+
+    epoll
+        → 帮线程监视很多 fd 的事件机制
+
+一个连接不等于一个线程。
+
+例如：
+
+    1000 个 client_fd
+        ↓
+    一个线程
+        ↓
+    epoll_wait()
+        ↓
+    只处理当前真正有事件的 fd
+
+
+==================================================
+四、epoll_create1()
+==================================================
+
+    int epfd = epoll_create1(0);
+
+作用：
+
+    在内核中创建一个 epoll 实例，
+    返回一个 fd（epfd）作为这个 epoll 实例的句柄。
+
+例如：
+
+    epfd = 3
+
+常见进程启动时：
+
+    fd 0 -> stdin   标准输入
+    fd 1 -> stdout  标准输出
+    fd 2 -> stderr  标准错误
+
+所以如果没有其他 fd 占用，新对象经常拿到最小可用 fd：3。
+但不保证一定是 3。
+
+参数：
+
+    epoll_create1(0)
+
+这里的 0：
+
+    → flags = 0
+    → 第一轮理解成普通创建，不加额外 flag
+
+不是：
+
+    “从 fd0 开始创建”。
+
+返回：
+
+    >= 0  成功，得到 epfd
+    -1    失败
+
+错误：
+
+    perror("epoll_create1");
+
+最后：
+
+    close(epfd);
+
+
+==================================================
+五、epoll_ctl()
+==================================================
+
+典型：
+
+    struct epoll_event ev;
+
+    ev.events = EPOLLIN;
+    ev.data.fd = client_fd;
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_ADD,
+        client_fd,
+        &ev
+    );
+
+四个参数：
+
+1. epfd
+    → 操作哪个 epoll 实例
+
+2. EPOLL_CTL_ADD
+    → 做什么操作
+    → 这里是“添加监视项”
+
+3. client_fd
+    → 真正被 epoll 监视的 fd
+
+4. &ev
+    → 这个 fd 的事件配置
+    → 包含：监视什么事件 + 以后事件返回时携带什么数据
+
+最重要：
+
+    第三个参数 fd
+        → 监视谁
+
+    ev.events
+        → 监视什么
+
+    ev.data
+        → 事件发生后，epoll_wait() 返回时附带什么信息
+
+
+==================================================
+六、struct epoll_event 两个重点成员
+==================================================
+
+第一轮重点：
+
+    ev.events
+    ev.data
+
+--------------------------------------------------
+1. ev.events
+--------------------------------------------------
+
+    ev.events = EPOLLIN;
+
+表示：
+
+    我关心这个 fd 的“可读事件”。
+
+对于 listen_fd：
+
+    listen_fd + EPOLLIN
+        → 有新连接可以 accept()
+
+对于 client_fd：
+
+    client_fd + EPOLLIN
+        → 有读相关事件
+        → 第一轮通常去 recv()
+
+所以先记：
+
+    listen_fd + EPOLLIN
+        → accept()
+
+    client_fd + EPOLLIN
+        → recv()
+
+--------------------------------------------------
+2. ev.data.fd
+--------------------------------------------------
+
+    ev.data.fd = client_fd;
+
+它不是第二次指定“监视哪个 fd”。
+
+真正被监视的 fd：
+
+    epoll_ctl() 的第三个参数
+
+而 ev.data.fd 是：
+
+    注册时存一个用户数据
+        ↓
+    以后事件发生
+        ↓
+    epoll_wait() 返回时带回来
+
+例如：
+
+    ev.events = EPOLLIN;
+    ev.data.fd = 5;
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_ADD,
+        5,
+        &ev
+    );
+
+含义：
+
+    真正监视：fd5
+    关心：EPOLLIN
+    事件返回时附带：data.fd = 5
+
+注意：
+
+    epoll_ctl()
+        → 注册/存进去
+
+    epoll_wait()
+        → 事件发生后拿回来
+
+
+==================================================
+七、ADD / DEL
+==================================================
+
+加入监视：
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_ADD,
+        fd,
+        &ev
+    );
+
+其中：
+
+    EPOLL_CTL_ADD
+        → 加入监视
+
+删除监视：
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_DEL,
+        fd,
+        NULL
+    );
+
+其中：
+
+    EPOLL_CTL_DEL
+        → 删除监视
+
+本节代码生命周期：
+
+    accept()
+        ↓
+    得到 client_fd
+        ↓
+    EPOLL_CTL_ADD
+        ↓
+    epoll 开始监视
+        ↓
+    客户端断开
+        ↓
+    EPOLL_CTL_DEL
+        ↓
+    close(fd)
+
+严谨补充：
+
+简单场景中，当某 fd 对应的底层对象完全关闭后，Linux 会处理相关 epoll 注册关系。
+但本节教学代码显式写：
+
+    EPOLL_CTL_DEL
+        +
+    close(fd)
+
+这样更清楚地表达：
+
+    停止监视
+        +
+    关闭 fd
+
+
+==================================================
+八、epoll_wait()
+==================================================
+
+定义：
+
+    struct epoll_event events[10];
+
+调用：
+
+    int n = epoll_wait(
+        epfd,
+        events,
+        10,
+        -1
+    );
+
+四个参数：
+
+1. epfd
+    → 等哪个 epoll 实例里的事件
+
+2. events
+    → 输出数组
+    → 内核把本次就绪事件写到这里
+
+3. 10
+    → 本次最多返回 10 个事件
+
+不是：
+    必须返回 10 个
+    第 10 个 fd
+    指定某一个 fd
+
+如果本次只有 3 个事件：
+
+    n = 3
+
+有效：
+
+    events[0]
+    events[1]
+    events[2]
+
+如果：
+
+    struct epoll_event events[3];
+
+通常就写：
+
+    epoll_wait(epfd, events, 3, -1);
+
+第三个参数不能超过实际安全数组容量。
+
+4. -1
+    → timeout
+    → 单位：毫秒
+
+常见：
+
+    -1
+        → 一直等，直到有事件
+
+    0
+        → 不等，立即返回
+
+    50
+        → 最多等 50 ms
+
+    1000
+        → 最多等 1000 ms = 1 秒
+
+如果写 50：
+
+    epoll_wait(epfd, events, 10, 50);
+
+表示最多等 50ms。
+如果第 10ms 就来了事件，会立即返回，不会硬等满 50ms。
+
+
+==================================================
+九、epoll_wait() 返回值 n
+==================================================
+
+    n > 0
+        → 本次返回 n 个就绪事件
+
+    n == 0
+        → timeout 到期，没有事件
+          （timeout >= 0 时可能发生）
+
+    n == -1
+        → 出错
+
+注意：
+
+    n = 本次返回多少事件
+
+不是：
+
+    epoll 总共监视多少 fd
+
+
+==================================================
+十、为什么要 while + for 两层循环
+==================================================
+
+服务器需要一直工作：
+
+    while (1)
+
+每次 epoll_wait() 会返回一批事件。
+
+例如：
+
+    n = 3
+
+那么：
+
+    events[0]
+    events[1]
+    events[2]
+
+都有效。
+
+所以：
+
+    while (1)
+    {
+        int n = epoll_wait(...);
+
+        for (int i = 0; i < n; i++)
+        {
+            ...
+        }
+    }
+
+执行：
+
+    epoll_wait
+        ↓
+    这次返回 n 个事件
+        ↓
+    for 一个一个处理
+        ↓
+    处理完
+        ↓
+    再次 epoll_wait
+
+
+==================================================
+十一、fd 是怎么变化的
+==================================================
+
+不是：
+
+    for (fd = 4; fd <= xxx; fd++)
+
+fd 编号不保证连续，且中间可能是：
+
+    已关闭 fd
+    普通文件
+    其他 socket
+    其他内核对象
+
+正确：
+
+    新客户端来了
+        ↓
+    accept()
+        ↓
+    真正得到 client_fd
+        ↓
+    需要 epoll 管理
+        ↓
+    EPOLL_CTL_ADD
+
+例如：
+
+    accept() -> fd5
+        → ADD fd5
+
+    下一次 accept() -> fd7
+        → ADD fd7
+
+程序不需要猜 fd6 是什么。
+
+
+==================================================
+十二、events[i] 为什么可以得到不同 fd
+==================================================
+
+假设 epoll_wait() 本次返回：
+
+    n = 3
+
+可能：
+
+    events[0].data.fd = 5
+    events[1].data.fd = 8
+    events[2].data.fd = 12
+
+代码：
+
+    for (int i = 0; i < n; i++)
+    {
+        int fd = events[i].data.fd;
+        ...
+    }
+
+于是：
+
+    i = 0 -> fd = 5
+    i = 1 -> fd = 8
+    i = 2 -> fd = 12
+
+fd 的变化来自：
+
+    不同的 events[i]
+
+不是 for 循环自己生成 fd。
+
+
+==================================================
+十三、先把 listen_fd 加进 epoll
+==================================================
+
+创建：
+
+    int epfd = epoll_create1(0);
+
+然后：
+
+    struct epoll_event ev;
+
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_ADD,
+        listen_fd,
+        &ev
+    );
+
+之后：
+
+    listen_fd 有新连接
+        ↓
+    epoll_wait() 返回事件
+        ↓
+    程序发现：fd == listen_fd
+        ↓
+    accept()
+
+
+==================================================
+十四、accept() 后还要 ADD 新 client_fd
+==================================================
+
+    int client_fd = accept(
+        listen_fd,
+        NULL,
+        NULL
+    );
+
+accept() 只是得到一个新的连接 fd。
+
+这个 client_fd 不会自动进入 epoll。
+
+所以：
+
+    ev.events = EPOLLIN;
+    ev.data.fd = client_fd;
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_ADD,
+        client_fd,
+        &ev
+    );
+
+完整：
+
+    listen_fd 有事件
+        ↓
+    accept()
+        ↓
+    client_fd
+        ↓
+    EPOLL_CTL_ADD
+        ↓
+    以后 client_fd 有事件
+        ↓
+    epoll_wait() 才会返回它
+
+
+==================================================
+十五、accept() 快速复习
+==================================================
+
+简化：
+
+    int client_fd = accept(
+        listen_fd,
+        NULL,
+        NULL
+    );
+
+作用：
+
+    从监听 socket 的已到达连接中取出一个连接，
+    返回新的 client_fd。
+
+参数：
+
+    listen_fd
+        → 哪个监听 socket
+
+    NULL
+        → 不关心客户端地址
+
+    NULL
+        → 不关心客户端地址长度
+
+如果需要客户端 IP/端口：
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    int client_fd = accept(
+        listen_fd,
+        (struct sockaddr *)&client_addr,
+        &client_len
+    );
+
+记忆：
+
+    listen_fd
+        → 监听新连接
+
+    accept()
+        → 接出一个连接
+
+    client_fd
+        → 后续 recv/send
+
+
+==================================================
+十六、EPOLLIN / EPOLLOUT
+==================================================
+
+EPOLLIN：
+
+    可读相关事件
+
+第一轮：
+
+    listen_fd + EPOLLIN
+        → accept()
+
+    client_fd + EPOLLIN
+        → recv()
+
+EPOLLOUT：
+
+    可写事件
+
+对于已连接 socket：
+
+    client_fd + EPOLLOUT
+        → 当前可写
+        → 程序可根据自己的发送状态调用 send()
+
+注意：
+
+    epoll 只通知状态
+
+不会自动：
+
+    accept
+    recv
+    send
+
+
+==================================================
+十七、epoll 和 accept/recv/send 的根本区别
+==================================================
+
+epoll：
+
+    事件发现 / 通知
+
+accept：
+
+    真正取出一个新 TCP 连接
+
+recv：
+
+    真正把收到的数据读到用户 buf
+
+send：
+
+    真正把用户数据交给 socket 发送路径
+
+所以：
+
+    epoll
+        → “谁现在能干活？”
+
+    accept / recv / send
+        → “真正把活干了”
+
+不要理解成：
+
+    listen_fd + EPOLLIN == 已经 accept
+
+或者：
+
+    client_fd + EPOLLIN == 已经 recv
+
+正确：
+
+    listen_fd + EPOLLIN
+        → 现在去 accept
+
+    client_fd + EPOLLIN
+        → 现在去 recv
+
+
+==================================================
+十八、INADDR_ANY 复习
+==================================================
+
+    server_addr.sin_addr.s_addr =
+        htonl(INADDR_ANY);
+
+INADDR_ANY：
+
+    → IPv4 本地通配地址
+    → 不只绑定某一个具体本机 IPv4 地址
+
+第一轮理解：
+
+    本机可用 IPv4 接口上的这个端口
+        ↓
+    都可以由该监听 socket 接收
+
+注意：
+
+客户端不是连接：
+
+    0.0.0.0
+
+客户端应该连接服务器某个具体可达 IP。
+
+
+==================================================
+十九、完整 demo44：TCP + epoll
+==================================================
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/epoll.h>
+
+#define PORT 8080
+#define MAX_EVENTS 10
+
+int main(void)
+{
+    int listen_fd = socket(
+        AF_INET,
+        SOCK_STREAM,
+        0
+    );
+
+    if (listen_fd == -1)
+    {
+        perror("socket");
+        return 1;
+    }
+
+
+    struct sockaddr_in server_addr;
+
+    memset(
+        &server_addr,
+        0,
+        sizeof(server_addr)
+    );
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr =
+        htonl(INADDR_ANY);
+
+
+    if (bind(
+            listen_fd,
+            (struct sockaddr *)&server_addr,
+            sizeof(server_addr)
+        ) == -1)
+    {
+        perror("bind");
+        close(listen_fd);
+        return 1;
+    }
+
+
+    if (listen(
+            listen_fd,
+            5
+        ) == -1)
+    {
+        perror("listen");
+        close(listen_fd);
+        return 1;
+    }
+
+
+    int epfd = epoll_create1(0);
+
+    if (epfd == -1)
+    {
+        perror("epoll_create1");
+        close(listen_fd);
+        return 1;
+    }
+
+
+    struct epoll_event ev;
+
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+
+    if (epoll_ctl(
+            epfd,
+            EPOLL_CTL_ADD,
+            listen_fd,
+            &ev
+        ) == -1)
+    {
+        perror("epoll_ctl listen");
+        close(epfd);
+        close(listen_fd);
+        return 1;
+    }
+
+
+    struct epoll_event events[MAX_EVENTS];
+
+    printf("server listening on port %d\n", PORT);
+
+
+    while (1)
+    {
+        int n = epoll_wait(
+            epfd,
+            events,
+            MAX_EVENTS,
+            -1
+        );
+
+        if (n == -1)
+        {
+            perror("epoll_wait");
+            break;
+        }
+
+
+        for (int i = 0; i < n; i++)
+        {
+            int fd = events[i].data.fd;
+
+
+            if (fd == listen_fd)
+            {
+                int client_fd = accept(
+                    listen_fd,
+                    NULL,
+                    NULL
+                );
+
+                if (client_fd == -1)
+                {
+                    perror("accept");
+                    continue;
+                }
+
+                printf(
+                    "new client fd = %d\n",
+                    client_fd
+                );
+
+
+                ev.events = EPOLLIN;
+                ev.data.fd = client_fd;
+
+                if (epoll_ctl(
+                        epfd,
+                        EPOLL_CTL_ADD,
+                        client_fd,
+                        &ev
+                    ) == -1)
+                {
+                    perror("epoll_ctl client");
+                    close(client_fd);
+                    continue;
+                }
+            }
+            else
+            {
+                char buf[128];
+
+                ssize_t ret = recv(
+                    fd,
+                    buf,
+                    sizeof(buf) - 1,
+                    0
+                );
+
+
+                if (ret > 0)
+                {
+                    buf[ret] = '\0';
+
+                    printf(
+                        "fd %d: %s\n",
+                        fd,
+                        buf
+                    );
+
+                    if (send(
+                            fd,
+                            buf,
+                            ret,
+                            0
+                        ) == -1)
+                    {
+                        perror("send");
+                    }
+                }
+                else if (ret == 0)
+                {
+                    printf(
+                        "client fd %d closed\n",
+                        fd
+                    );
+
+                    epoll_ctl(
+                        epfd,
+                        EPOLL_CTL_DEL,
+                        fd,
+                        NULL
+                    );
+
+                    close(fd);
+                }
+                else
+                {
+                    perror("recv");
+
+                    epoll_ctl(
+                        epfd,
+                        EPOLL_CTL_DEL,
+                        fd,
+                        NULL
+                    );
+
+                    close(fd);
+                }
+            }
+        }
+    }
+
+
+    close(epfd);
+    close(listen_fd);
+
+    return 0;
+}
+
+
+==================================================
+二十、完整执行链
+==================================================
+
+    socket()
+        ↓
+    bind()
+        ↓
+    listen()
+        ↓
+    epoll_create1()
+        ↓
+    epfd
+        ↓
+    listen_fd + EPOLL_CTL_ADD
+        ↓
+    while(1)
+        ↓
+    epoll_wait()
+        ↓
+    返回 n 个事件
+        ↓
+    for 一个个处理
+
+如果：
+
+    fd == listen_fd
+        ↓
+    accept()
+        ↓
+    client_fd
+        ↓
+    EPOLL_CTL_ADD
+
+否则：
+
+    client_fd 事件
+        ↓
+    recv()
+
+recv > 0：
+
+    收数据
+        ↓
+    本 demo 简单 send() 回去
+
+recv == 0：
+
+    对端关闭
+        ↓
+    EPOLL_CTL_DEL
+        ↓
+    close(fd)
+
+
+==================================================
+二十一、三个 epoll API 横向总结
+==================================================
+
+1. epoll_create1()
+
+    → 创建 epoll 实例
+
+2. epoll_ctl()
+
+    → 管理监视项
+
+    EPOLL_CTL_ADD
+        → 加入
+
+    EPOLL_CTL_DEL
+        → 删除
+
+3. epoll_wait()
+
+    → 等待已注册 fd 的事件
+    → 把本次就绪事件放进 events 数组
+
+一句话：
+
+    create
+        → 创建管理器
+
+    ctl
+        → 告诉管理器盯谁、盯什么
+
+    wait
+        → 等管理器告诉你谁有事
+
+
+==================================================
+二十二、最容易混淆的点
+==================================================
+
+1.
+错误：
+    epoll 替代 recv/send。
+
+正确：
+    epoll 只负责事件通知。
+    recv/send 才真正进行 I/O。
+
+--------------------------------------------------
+
+2.
+错误：
+    client_fd 没数据，是连接阻塞。
+
+正确：
+    默认阻塞 recv() 时，阻塞的是执行 recv() 的线程。
+
+--------------------------------------------------
+
+3.
+错误：
+    epoll_wait(..., 10, ...)
+    表示一定拿 10 个事件。
+
+正确：
+    10 是本次最多返回 10 个。
+
+--------------------------------------------------
+
+4.
+错误：
+    n 是 epoll 总共有多少 fd。
+
+正确：
+    n 是本次 epoll_wait 返回多少事件。
+
+--------------------------------------------------
+
+5.
+错误：
+    ev.data.fd 决定真正监视哪个 fd。
+
+正确：
+    epoll_ctl 第三个 fd 参数决定真正监视谁。
+    ev.data.fd 是以后事件返回时带回来的用户数据。
+
+--------------------------------------------------
+
+6.
+错误：
+    epoll_ctl() 会立刻返回 data。
+
+正确：
+    epoll_ctl → 存进去
+    epoll_wait → 事件发生后拿回来
+
+--------------------------------------------------
+
+7.
+错误：
+    fd 从 4 一直循环到最后进行注册。
+
+正确：
+    socket()/accept() 真正得到哪个 fd，
+    需要 epoll 管理就 ADD 哪个。
+
+--------------------------------------------------
+
+8.
+错误：
+    listen_fd + EPOLLIN 就已经 accept。
+
+正确：
+    EPOLLIN 只是告诉程序现在可以/应该 accept。
+
+--------------------------------------------------
+
+9.
+错误：
+    client_fd + EPOLLIN 已经把数据收到了。
+
+正确：
+    EPOLLIN 只是通知；真正读取还需要 recv()。
+
+
+==================================================
+二十三、第一轮必须掌握
+==================================================
+
+[1]
+    为什么一个线程直接多个阻塞 recv 会有问题
+
+[2]
+    epoll 负责事件通知，不负责真正 I/O
+
+[3]
+    epoll_create1()
+        → 创建 epoll 实例
+
+[4]
+    epoll_ctl()
+        → ADD / DEL
+
+[5]
+    epoll_wait()
+        → 等待一批就绪事件
+
+[6]
+    epoll_ctl 四个参数：
+
+        epfd
+        操作
+        被监视 fd
+        &ev
+
+[7]
+    ev.events
+        → 监视什么事件
+
+[8]
+    ev.data.fd
+        → 事件返回时帮助识别 fd
+
+[9]
+    listen_fd + EPOLLIN
+        → accept()
+
+[10]
+    client_fd + EPOLLIN
+        → recv()
+
+[11]
+    accept() 得到 client_fd 后
+        → ADD 进 epoll
+
+[12]
+    epoll_wait 的 maxevents
+        → 最多返回几个
+
+[13]
+    timeout：
+        -1  无限等
+         0  立即返回
+        >0  最多等待对应毫秒数
+
+[14]
+    events[i]
+        → 每次取得本批不同事件
+
+
+==================================================
+二十四、工程严谨补充
+==================================================
+
+本 demo 为第一轮机制学习，采用：
+
+    阻塞 socket
+    默认 epoll 行为
+    每次事件做一次 accept / recv
+
+这是教学简化版。
+
+更完整的高并发工程代码通常还会继续处理：
+
+    非阻塞 socket
+    fcntl / SOCK_NONBLOCK
+    accept 循环
+    recv 循环
+    EAGAIN / EWOULDBLOCK
+    LT / ET
+    EPOLLERR
+    EPOLLHUP / EPOLLRDHUP
+    send 缓冲
+    EPOLLOUT
+
+所以当前 demo 不应理解为“生产级 epoll 服务器的最终完整写法”。
+本节核心是先掌握事件驱动的数据流。
+
+
+==================================================
+二十五、最短复习版
+==================================================
+
+    int epfd = epoll_create1(0);
+
+    struct epoll_event ev;
+    struct epoll_event events[10];
+
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+
+    epoll_ctl(
+        epfd,
+        EPOLL_CTL_ADD,
+        listen_fd,
+        &ev
+    );
+
+
+    while (1)
+    {
+        int n = epoll_wait(
+            epfd,
+            events,
+            10,
+            -1
+        );
+
+        for (int i = 0; i < n; i++)
+        {
+            int fd = events[i].data.fd;
+
+            if (fd == listen_fd)
+            {
+                int client_fd = accept(
+                    listen_fd,
+                    NULL,
+                    NULL
+                );
+
+                ev.events = EPOLLIN;
+                ev.data.fd = client_fd;
+
+                epoll_ctl(
+                    epfd,
+                    EPOLL_CTL_ADD,
+                    client_fd,
+                    &ev
+                );
+            }
+            else
+            {
+                char buf[128];
+
+                ssize_t ret = recv(
+                    fd,
+                    buf,
+                    sizeof(buf) - 1,
+                    0
+                );
+
+                if (ret == 0)
+                {
+                    epoll_ctl(
+                        epfd,
+                        EPOLL_CTL_DEL,
+                        fd,
+                        NULL
+                    );
+
+                    close(fd);
+                }
+            }
+        }
+    }
+
+
+脑内模型：
+
+    创建 epoll
+        ↓
+    listen_fd ADD
+        ↓
+    epoll_wait
+        ↓
+    谁有事件？
+        ↓
+    listen_fd
+        → accept
+        → 新 client_fd
+        → ADD
+
+    client_fd
+        → recv
+
+    断开
+        → DEL
+        → close
+
+
+==================================================
+二十六、一句话总结
+==================================================
+
+epoll：
+
+    把很多 fd 注册给内核监视，
+    epoll_wait() 只把当前发生事件的 fd 返回给线程，
+    线程再根据“fd 身份 + 事件类型”
+    调用 accept()/recv()/send() 真正处理网络 I/O。
