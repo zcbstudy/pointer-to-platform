@@ -1,0 +1,796 @@
+﻿RK3566 二轮学习笔记
+demo1：GPIO + SIGINT 三版演进 + 错误复盘
+
+==================================================
+一、硬件信息
+==================================================
+
+开发板：EmbedFire LubanCat-Zero
+SoC：RK3566
+
+外接 LED：
+GPIO1_A4
+gpiochip1 line 4
+物理引脚 13
+GND：物理引脚 14
+
+GPIO 编号规律：
+Ax -> line x
+Bx -> line 8+x
+Cx -> line 16+x
+Dx -> line 24+x
+
+所以：
+GPIO1_A4 = gpiochip1 line 4
+
+
+==================================================
+二、demo1 第一版：system + gpioset + SIGINT
+==================================================
+
+目标：
+1. 注册 SIGINT
+2. handler 只做 stop = 1
+3. while(!stop) 控制 LED 高低电平
+4. 用 system() 调 gpioset
+5. Ctrl+C 后退出
+6. 退出前 GPIO 拉低
+
+代码：
+
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+volatile sig_atomic_t stop = 0;
+
+void handler(int sig)
+{
+    (void)sig;
+    stop = 1;
+}
+
+int main()
+{
+    struct sigaction sa = {0};
+
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, NULL);
+
+    while (!stop)
+    {
+        system("gpioset -m time -s 1 1 4=1");
+        system("gpioset -m time -s 1 1 4=0");
+    }
+
+    system("gpioset 1 4=0");
+
+    return 0;
+}
+
+第一版重点：
+- sigaction(SIGINT, &sa, NULL)：SIGINT 使用 sa 这套规则。
+- sa.sa_handler = handler：SIGINT 到来后执行 handler()。
+- sigemptyset(&sa.sa_mask)：清空 handler 执行期间额外屏蔽的信号集合。
+- sa.sa_flags = 0：不启用额外特殊行为。
+- volatile sig_atomic_t stop：用于 signal handler 和正常主流程之间做简单状态通知。
+- handler 只做 stop = 1，不在 handler 里做复杂 GPIO 清理。
+
+第一版最重要实验现象：
+使用 system() 时，Ctrl+C 行为不直观。
+
+例如：
+LED 高
+-> Ctrl+C
+-> 当前 gpioset 可能被 SIGINT 打断
+-> LED 变低
+-> 但父 C 程序的 handler 不一定执行
+-> stop 仍可能为 0
+-> while(!stop) 继续成立
+-> 又创建新的 gpioset
+-> LED 又开始高低循环
+
+原因：
+system() 执行期间会对 SIGINT / SIGQUIT 做特殊处理。
+
+结论：
+不是 sigaction() 本身写错。
+而是 system() 把 shell、子进程、信号行为隐藏起来了。
+
+Ctrl+Z：
+产生 SIGTSTP，只暂停进程，不是退出。
+GPIO request 可能仍然被占用。
+
+排查命令：
+jobs -l
+pgrep -a gpioset
+pgrep -af demo1_led_first
+kill PID
+sudo kill -KILL PID
+sudo pkill -KILL gpioset
+sudo gpioinfo gpiochip1
+
+重要区别：
+%1 -> 当前 shell 的 job 编号
+PID -> Linux 进程 ID
+
+如果程序通过 sudo 启动：
+sudo ./demo1_led_first
+
+普通用户直接 kill root 进程可能报：
+Operation not permitted
+
+还观察到：
+杀掉外层 sudo 后，真正的程序仍可能继续运行并不断创建 gpioset。
+
+说明：
+杀父进程 != 所有子进程一定一起死
+
+GPIO 状态：
+line 4: unnamed unused output active-high
+
+unused -> GPIO 已经没有进程占用
+output -> 当前 GPIO 方向仍然是输出
+
+所以：
+GPIO 拉低 != GPIO 释放
+GPIO 释放 != GPIO 一定立即恢复 input
+
+
+==================================================
+三、demo1 第二版：fork + execl + led.sh
+==================================================
+
+目标：
+不用 system()，自己明确控制：
+fork
+exec
+signal
+kill
+waitpid
+
+C 代码：
+
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <sys/wait.h>
+
+volatile sig_atomic_t stop = 0;
+
+void handler(int sig)
+{
+    (void)sig;
+    stop = 1;
+}
+
+int main()
+{
+    struct sigaction sa = {0};
+
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, NULL);
+
+    pid_t pid = fork();
+
+    if (pid < 0)
+    {
+        perror("fork");
+        return 1;
+    }
+    else if (pid == 0)
+    {
+        execl("./led.sh", "./led.sh", (char *)NULL);
+
+        perror("execl");
+        return 1;
+    }
+    else
+    {
+        pause();
+
+        if (stop == 1)
+        {
+            kill(pid, SIGTERM);
+            waitpid(pid, NULL, 0);
+        }
+    }
+
+    return 0;
+}
+
+led.sh：
+
+#!/bin/bash
+
+while true
+do
+    gpioset -m time -s 1 1 4=1
+    gpioset -m time -s 1 1 4=0
+done
+
+脚本执行权限：
+chmod +x led.sh
+
+第二版核心理解：
+
+fork() 返回值：
+pid < 0  -> 创建失败
+pid == 0 -> 子进程
+pid > 0  -> 父进程，且 pid 就是子进程 PID
+
+execl()：
+不是创建新进程。
+而是把当前子进程原来的程序替换掉。
+
+kill(pid, SIGTERM)：
+给指定 PID 的进程发送 SIGTERM。
+
+waitpid(pid, NULL, 0)：
+父进程等待并回收指定子进程。
+
+可以记成：
+kill -> 负责结束
+waitpid -> 负责回收
+
+pause()：
+父进程阻塞在这里等待信号。
+它不是控制 LED 的循环。
+LED 的循环已经在 led.sh 里。
+
+第二版重要原则：
+handler 里只做：
+stop = 1;
+
+不要把 kill、waitpid、GPIO 清理等复杂操作塞进 handler。
+
+正确模型：
+SIGINT
+-> handler
+-> stop = 1
+-> handler 尽快返回
+-> main 恢复正常执行
+-> main 发现 stop == 1
+-> kill
+-> waitpid
+-> 清理
+-> return
+
+第二版踩过的坑：
+
+1. 一开始想在父进程里再写 while 等待。
+后来发现 LED 的 while 已经在 .sh 中。
+父进程的等待和 LED 循环不是一回事，最后用 pause() 更干净。
+
+2. 一开始误以为“信号终止 execl”。
+正确：execl 成功后已经把子进程替换成 led.sh。
+信号终止的是 execl 之后正在运行的新程序/子进程。
+
+3. 一开始想父 C 的 stop 能不能直接让 shell 里的 while 退出。
+不能，因为父进程的 stop 和 shell 变量属于不同进程。
+
+4. led.sh 出现：
+syntax error: unexpected end of file
+原因是忘了 Bash while 的完整结构：
+while true
+do
+    ...
+done
+
+5. Ctrl+C 后 GPIO 最后可能停在高电平。
+原因是子进程终止时，最后一次 GPIO 状态可能正好是高。
+所以退出时还需要明确做最终低电平清理。
+
+
+==================================================
+四、demo1 第三版：libgpiod 最终版
+==================================================
+
+当前环境：
+gpioset --version
+-> libgpiod 1.4.1
+
+pkg-config --modversion libgpiod
+-> 1.4.1
+
+第三版目标：
+不再依赖：
+system
+shell
+gpioset 外部命令
+fork
+execl
+kill
+waitpid
+
+而是：
+自己的 C 程序
+-> libgpiod
+-> Linux 内核 GPIO 接口
+-> gpiochip1
+-> line 4
+-> LED
+
+第三版完整代码：
+
+#include <gpiod.h>
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+
+volatile sig_atomic_t stop = 0;
+
+void handler(int sig)
+{
+    (void)sig;
+    stop = 1;
+}
+
+int main()
+{
+    struct gpiod_chip *chip = gpiod_chip_open_by_number(1);
+
+    if (chip == NULL)
+    {
+        perror("gpiod_chip_open_by_number");
+        return 1;
+    }
+
+    struct gpiod_line *line = gpiod_chip_get_line(chip, 4);
+
+    if (line == NULL)
+    {
+        perror("gpiod_chip_get_line");
+        gpiod_chip_close(chip);
+        return 1;
+    }
+
+    int ret = gpiod_line_request_output(
+        line,
+        "demo1_led_finish",
+        0
+    );
+
+    if (ret < 0)
+    {
+        perror("gpiod_line_request_output");
+        gpiod_chip_close(chip);
+        return 1;
+    }
+
+    struct sigaction sa = {0};
+
+    sa.sa_handler = handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+
+    sigaction(SIGINT, &sa, NULL);
+
+    while (!stop)
+    {
+        gpiod_line_set_value(line, 1);
+        sleep(1);
+
+        gpiod_line_set_value(line, 0);
+        sleep(1);
+    }
+
+    gpiod_line_set_value(line, 0);
+
+    gpiod_line_release(line);
+
+    gpiod_chip_close(chip);
+
+    return 0;
+}
+
+编译：
+gcc demo1_led_finish.c -o demo1_led_finish -Wall -Wextra -lgpiod
+
+运行：
+sudo ./demo1_led_finish
+
+
+==================================================
+五、libgpiod 资源生命周期
+==================================================
+
+1. 打开 gpiochip1
+
+struct gpiod_chip *chip;
+chip = gpiod_chip_open_by_number(1);
+
+理解：
+打开 gpiochip1。
+
+2. 找 line 4
+
+struct gpiod_line *line;
+line = gpiod_chip_get_line(chip, 4);
+
+理解：
+从 gpiochip1 中找到 line 4。
+
+注意：
+get_line 只是“找到这根 GPIO”，不等于已经占用它。
+
+3. 申请 line 4 为输出
+
+int ret;
+
+ret = gpiod_line_request_output(
+    line,
+    "demo1_led_finish",
+    0
+);
+
+参数：
+line -> 要申请的 GPIO line
+"demo1_led_finish" -> consumer name，占用者标签，只是字符串
+0 -> 申请成功后初始输出低电平
+
+真正取得 GPIO 使用权的是：
+gpiod_line_request_output()
+
+不是：
+gpiod_chip_get_line()
+
+如果 GPIO 已被别人占用：
+request_output 会失败。
+
+Linux 不会因为别人又来申请，
+就自动把当前使用者的 GPIO 抢走。
+
+4. 设置电平
+
+高：
+gpiod_line_set_value(line, 1);
+
+低：
+gpiod_line_set_value(line, 0);
+
+类似 51：
+led = 1;
+led = 0;
+
+区别是 Linux 前面多了：
+open chip
+-> get line
+-> request
+
+因为 Linux 要做资源管理。
+
+5. 退出清理
+
+正确顺序：
+gpiod_line_set_value(line, 0);
+gpiod_line_release(line);
+gpiod_chip_close(chip);
+
+分别表示：
+set_value(0) -> 最后保证低电平
+line_release -> 释放 line 4 使用权
+chip_close -> 关闭 gpiochip1
+
+重要：
+GPIO 拉低 != GPIO 释放
+GPIO 释放 != 关闭 gpiochip
+
+资源管理原则：
+成功申请了什么，退出时才释放什么。
+
+chip open 成功 -> 最后 chip_close
+line request 成功 -> 最后 line_release
+line request 失败 -> 不需要 line_release，因为根本没拿到使用权
+
+
+==================================================
+六、第三版实际手敲错误记录
+==================================================
+
+错误 1：
+#include <unist.h>
+
+正确：
+#include <unistd.h>
+
+错误 2：
+漏写：
+volatile sig_atomic_t stop = 0;
+
+错误 3：
+写成中文全角括号：
+（void)sig;
+
+GCC 报：
+stray '\357' in program
+stray '\274' in program
+stray '\210' in program
+
+正确：
+(void)sig;
+
+错误 4：
+line 类型写成：
+struct gpiod_chip *line
+
+正确：
+struct gpiod_line *line
+
+原因：
+chip 是 GPIO 控制器对象。
+line 是控制器里面的一根 GPIO line。
+
+错误 5：
+忘写 chip 参数：
+gpiod_chip_get_line(4);
+
+正确：
+gpiod_chip_get_line(chip, 4);
+
+错误 6：
+写成：
+if(line == NULL);
+
+后面多了一个分号。
+
+这会变成：
+if(line == NULL)
+    ;
+
+后面的代码块会无条件执行。
+
+正确：
+if(line == NULL)
+{
+    ...
+}
+
+这是 C 中非常典型的隐蔽 bug。
+
+错误 7：
+定义：
+int ret = gpiod_line_request_output(...);
+
+后面却写：
+if(set < 0)
+
+GCC 提示：
+‘set’ undeclared
+did you mean ‘ret’?
+
+正确：
+if(ret < 0)
+
+错误 8：
+release 拼错：
+gpiod_line_replease(line, 4);
+
+正确：
+gpiod_line_release(line);
+
+而且只需要一个参数 line。
+
+错误 9：
+一开始认为：
+get_line 成功 = 已经拿到 GPIO 使用权
+
+错误。
+
+正确：
+get_line -> 只是找到 line 对象
+request_output -> 真正向内核申请 GPIO 使用权
+
+错误 10：
+一开始认为如果别人要这个 GPIO，
+Linux 会把 GPIO 从当前程序交出去。
+
+错误。
+
+正确：
+当前程序 request 成功后，
+别人再申请通常会失败：
+Device or resource busy
+
+直到：
+gpiod_line_release(line);
+
+或者当前进程结束，资源被内核释放。
+
+错误 11：
+忘记最后：
+gpiod_line_release(line);
+
+正确生命周期：
+拉低
+-> release line
+-> close chip
+
+
+==================================================
+七、为什么编译要加 -lgpiod
+==================================================
+
+#include <gpiod.h>
+作用：
+给编译器提供函数声明。
+
+真正的函数实现放在 libgpiod 库中。
+
+所以编译时要：
+gcc demo1_led_finish.c -o demo1_led_finish -Wall -Wextra -lgpiod
+
+可以理解成：
+#include <gpiod.h>
+-> 拿说明书
+
+-lgpiod
+-> 把真正的功能代码接进程序
+
+如果不加 -lgpiod，
+通常链接时会出现：
+undefined reference to ...
+
+
+==================================================
+八、三个版本的关系
+==================================================
+
+第一版：
+
+C
+-> system()
+-> shell
+-> gpioset
+-> libgpiod
+-> kernel
+-> GPIO
+
+作用：
+看见 system + signal 的坑。
+
+
+第二版：
+
+C
+-> fork()
+-> execl()
+-> led.sh
+-> gpioset
+-> libgpiod
+-> kernel
+-> GPIO
+
+作用：
+复习和理解：
+fork
+exec
+PID
+signal
+pause
+kill
+waitpid
+shell
+子进程生命周期
+
+
+第三版：
+
+C
+-> libgpiod
+-> kernel
+-> GPIO
+
+作用：
+C 程序自己管理 GPIO：
+打开
+找到
+申请
+控制
+拉低
+释放
+关闭
+
+
+==================================================
+九、demo1 最终核心理解
+==================================================
+
+1.
+Shell 自己不会直接驱动 GPIO。
+gpioset 是一个用户态程序。
+Shell 只是启动 gpioset。
+
+2.
+C 在 Linux 中可以通过：
+系统调用
+设备文件
+ioctl
+mmap
+各种库
+去操作真实硬件。
+
+3.
+以后 RK3566 上可以继续这样学：
+GPIO
+UART
+I2C
+SPI
+PWM
+V4L2 摄像头
+飞控串口
+socket
+线程
+进程
+共享内存
+
+4.
+Linux GPIO 和 51 / STM32 最大区别之一：
+
+51 / STM32：
+通常直接配置寄存器和高低电平。
+
+Linux：
+open chip
+-> get line
+-> request
+-> set value
+-> release
+-> close
+
+5.
+重要工程思想：
+
+“找到资源” != “拥有资源”
+“拉低 GPIO” != “释放 GPIO”
+“结束子进程” != “回收子进程”
+“信号到了” != “所有清理都应该在 handler 里做”
+
+6.
+signal handler 原则：
+
+只做最小通知：
+stop = 1;
+
+复杂处理放回 main。
+
+
+==================================================
+十、demo1 学习完成
+==================================================
+
+demo1 第一版：
+system + gpioset + SIGINT
+
+demo1 第二版：
+fork + execl + shell + kill + waitpid
+
+demo1 第三版：
+libgpiod C API + GPIO 完整资源生命周期
+
+最终完成：
+RK3566 GPIO
++
+Linux signal
++
+process
++
+shell
++
+resource lifecycle
+
+三个版本不是重复，
+而是从：
+
+“调用别人的程序控制硬件”
+
+一步一步走到：
+
+“自己的 C 程序直接管理硬件资源”。
