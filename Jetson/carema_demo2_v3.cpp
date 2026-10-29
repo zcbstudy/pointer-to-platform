@@ -8,13 +8,23 @@
 #include <vector>
 
 // TensorRT 日志记录器
+// class Logger定义一个类叫做Logger nvinfer1::ILogger是TensorRT的日志接口
+// 这个类继承自nvinfer1::ILogger，并重写了log函数
 class Logger : public nvinfer1::ILogger
 {
+//  public不是函数 不是变量 是访问权限标签 告诉编译器 后面声明的成员可以被外部代码访问
 public:
+    // 实现了ILogger要求的log()函数 
+    // override是告诉编译器这个函数是重写基类的虚函数，检查这个函数是否匹配
+    // noexcept表示这个函数不会抛出异常
+    // 参数：severity 日志级别，msg 日志内容
     void log(Severity severity, const char* msg) noexcept override
     {
+        // severity 函数收到的参数 表示这条日志的严重程度
+        // Severity::kWARNING 是 TensorRt定义的一个日志级别
         if (severity <= Severity::kWARNING)
         {
+            // msg 输出TensorRT传进来的具体日志文字
             std::cerr << "[TensorRT] " << msg << '\n';
         }
     }
