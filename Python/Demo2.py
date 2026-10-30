@@ -73,7 +73,7 @@ cat = Cat()
 dog.sound()
 cat.sound()
 '''
-
+'''
 #父类Fruit 类属性shet"生鲜货架" 实例属性name 方法show（） 输出一句话 水果真甜
 #两个子类orange watemelon 继承父类 增加实例属性chandi（产地） 重写show（）输出一句话 橙子酸甜可口、柠檬果汁酸甜 产地是xxx
 #用多态函数shuitian（），调用show（）方法
@@ -109,4 +109,5 @@ orange = Orange("橙子", "广东")
 watermelon = Watermelon("西瓜", "湖南")
 shuitian(orange)
 shuitian(watermelon)
+'''
 

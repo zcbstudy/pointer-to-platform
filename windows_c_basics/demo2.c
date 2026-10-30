@@ -19,7 +19,7 @@ int main()
 	prev = head;
 	while (1)
 	{
-		scanf_s("%d", &a);
+		scanf("%d", &a);
 		if (a == -1)
 		{
 			break;
