@@ -1,7 +1,8 @@
 
 #include <NvInfer.h>
+#include <cuda_runtime_api.h>
 #include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgprocs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <cstdio>
 #include <cstdint>
 #include <iostream>
@@ -224,7 +225,7 @@ int main()
 
     // 第七部分 打开一张图片
     cv::Mat image = cv::imread(
-        "~/RoadToEmbedded/Jetson/Demo1_Camera/first.jpg",
+        "/workspace/RoadToEmbedded/Jetson/Demo1_Camera/first.jpg",
         cv::IMREAD_COLOR
     );
 
@@ -264,10 +265,12 @@ int main()
     // 这里只是说明想开辟空间
     // std::vector<float> chw(pixels * 3);
     // 实际上可以写 
+    std::vector<float> chw(pixels * 3);
     std::size_t input_bytes = chw.size() * sizeof(float);
     void* device_input = nullptr;
     const unsigned char* bgr = resized.ptr<unsigned char>();
-    for (int i = 0; i < pixels * 3; i+ = 3)
+    int j = 0;
+    for (int i = 0; i < pixels * 3; i += 3)
     {
         chw[j] = bgr[i + 2] / 255.0f; //R
         chw[pixels + j] = bgr[i + 1] / 255.0f;  //G
@@ -279,6 +282,7 @@ int main()
     // engine->getNbIOTensors()返回Engine的输入张量与输出张量的总数量
     const char* input_name = nullptr;
     const char* output_name = nullptr;
+    std::size_t output_count = 0;
     for(int i = 0;i < engine->getNbIOTensors();i++)
     {
         // getIOTensorName(i)返回的是字符串指针 所以用const char* name接受
@@ -295,25 +299,37 @@ int main()
             // getTensorDataType(name)返回的是张量的数据类型
             // 用于判断张量是FP32还是FP16还是INT8
             // 先理解为这个输入张量的数据类型是不是FP32
-            if(engine -> getTensorDataType(name)) == nvinfer1::DataType::kFLOAT
+            if(engine -> getTensorDataType(name) == nvinfer1::DataType::kFLOAT)
             {
                 std::cout << "输入张量数据类型：FP32\n";
             }else{
 
                 std::cout << "输入张量数据类型：no FP32\n";
+                delete context;
+                delete engine;
+                delete runtime;
+                return 1;
             }
         }   
 
         //十三部分：获取输出张量
         // 这个和上面一模一样 只是kouput表示输出
-        std::size_t output_count = 1;
         if(engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kOUTPUT)
         {
             output_name = name;
+            output_count = 1;
             if(output_name != nullptr)
             {
                 // nvinfer::Dims是TensorRT定义的一个类型 专门用来保存张量的形状信息
                 nvinfer1::Dims output_shape = engine->getTensorShape(output_name);
+                if (output_shape.nbDims <= 0)
+                {
+                    std::cerr << "输出形状无效\n";
+                    delete context;
+                    delete engine;
+                    delete runtime;
+                    return 1;
+                }
                 // output_shape.nbDimes: 张量有多少个维度
                 // output_shape.d[i]: 第i个维度的大小
                 // 举例： 假设输出形状为（1,84,8400） 会一次输出1 84 8400
@@ -321,13 +337,22 @@ int main()
                 {
                     //d[i]是Dims内部数组 用来保存每个维度大小
                     //output_count *= static_cast<std::size_t>(output_shape.d[i]);等价于output_count = output_count * shape.d[i]
+                    if (output_shape.d[i] <= 0 ||
+                        output_count > std::numeric_limits<std::size_t>::max() /
+                            static_cast<std::size_t>(output_shape.d[i]))
+                    {
+                        std::cerr << "输出维度无效或元素数量溢出\n";
+                        delete context;
+                        delete engine;
+                        delete runtime;
+                        return 1;
+                    }
                     output_count *= static_cast<std::size_t>(output_shape.d[i]);
                     std::cout << output_shape.d[i] << " ";
                 }
                 if(engine -> getTensorDataType(name) == nvinfer1::DataType::kFLOAT)
                 {
                     std::cout << "输出张量数据类型：FP32\n";
-                    nvinfer1::Dims output_shape = engine -> getTensorShape(output_name);
                 }else
                 {
                     std::cerr << "输出张量数据类型：no FP32\n";
@@ -388,10 +413,10 @@ int main()
     {
         std::cerr << "cudaMemcpy失败\n"
                   << cudaGetErrorString(err) << '\n';
+        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
-        cudaFree(device_input);
         return 1;
     }
 
@@ -400,10 +425,10 @@ int main()
     {
         std::cerr<< "没有找到张量\n";
 
+        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
-        cudaFree(device_input);
         return 1;
 
     }
@@ -414,13 +439,23 @@ int main()
     if(!context->setTensorAddress(input_name, device_input))
     {
         std::cerr << "setTensorAddress失败\n";
+        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
-        cudaFree(device_input);
         return 1;
     }
     //第十三部分续： 申请输出CUDA内存
+    if (output_name == nullptr || output_count == 0 ||
+        output_count > std::numeric_limits<std::size_t>::max() / sizeof(float))
+    {
+        std::cerr << "未找到有效的输出张量或输出字节数溢出\n";
+        cudaFree(device_input);
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }
     std::size_t output_bytes = output_count * sizeof(float);
     void* device_output = nullptr;
     err = cudaMalloc(&device_output, output_bytes);
@@ -428,30 +463,19 @@ int main()
     {
         std::cerr << "cudaMalloc失败\n"
                   << cudaGetErrorString(err) << '\n';
+        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
-        cudaFree(device_input);
         return 1;
     }
 
     //第十四部分：绑定输出张量
-    if(output_name == nullptr)
-    {
-        std::cerr<< "没有找到张量\n";
-
-        delete context;
-        delete engine;
-        delete runtime;
-        cudaFree(device_input);
-        return 1;
-
-    }
     if(!context -> setTensorAddress(output_name, device_output))
     {
         std::cerr << "setTensorAddress失败\n";
         cudaFree(device_input);
-        cudaFree(device_output)
+        cudaFree(device_output);
         delete context;
         delete engine;
         delete runtime;
@@ -459,10 +483,11 @@ int main()
     }
 
     // 第部分：释放资源
+    cudaFree(device_output);
+    cudaFree(device_input);
     delete context;
     delete engine;
     delete runtime;
-    cudaFree(device_input);
 
     return 0;
 }
