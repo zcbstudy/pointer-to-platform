@@ -348,7 +348,7 @@ int main()
     // 即使Jetson的CPU、GPU共享物理内存 但是std::vctor的地址并不能因此无条件直接作为TensoRT的设备缓冲区地址
     
     // 向CUDA申请input——bytes 字节的设备内存
-    cudaError_t err = cudaMalloc(&device_input,input_bytes)
+    cudaError_t err = cudaMalloc(&device_input,input_bytes);
 
     if(err != cudaSuccess)
     {
@@ -378,7 +378,7 @@ int main()
         // cudaMemcpyHostToHost：从CPU内存复制到CPU内存
         }
     */
-    cudaError_t err = cudaMemcpy(
+    err = cudaMemcpy(
         device_input,// 刚刚申请的CUDA设备内存
         chw.data(),// 保存RGB/CHW图片张量的CPU内存首地址
         input_bytes,// 刚才计算的总字节数
@@ -386,7 +386,7 @@ int main()
     );
     if(err != cudaSuccess)
     {
-        std::cerr << "cudaMemcpy失败\n";
+        std::cerr << "cudaMemcpy失败\n"
                   << cudaGetErrorString(err) << '\n';
         delete context;
         delete engine;
@@ -420,12 +420,49 @@ int main()
         cudaFree(device_input);
         return 1;
     }
+    //第十三部分续： 申请输出CUDA内存
+    std::size_t output_bytes = output_count * sizeof(float);
+    void* device_output = nullptr;
+    err = cudaMalloc(&device_output, output_bytes);
+    if(err != cudaSuccess)
+    {
+        std::cerr << "cudaMalloc失败\n"
+                  << cudaGetErrorString(err) << '\n';
+        delete context;
+        delete engine;
+        delete runtime;
+        cudaFree(device_input);
+        return 1;
+    }
+
+    //第十四部分：绑定输出张量
+    if(output_name == nullptr)
+    {
+        std::cerr<< "没有找到张量\n";
+
+        delete context;
+        delete engine;
+        delete runtime;
+        cudaFree(device_input);
+        return 1;
+
+    }
+    if(!context -> setTensorAddress(output_name, device_output))
+    {
+        std::cerr << "setTensorAddress失败\n";
+        cudaFree(device_input);
+        cudaFree(device_output)
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }
 
     // 第部分：释放资源
+    delete context;
     delete engine;
     delete runtime;
-    delete context;
-    cudaFree(device_input)
+    cudaFree(device_input);
 
     return 0;
 }
