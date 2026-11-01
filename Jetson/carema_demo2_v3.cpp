@@ -260,7 +260,12 @@ int main()
     // cv::Mat 和模型输入张量的区别，不只是尺寸，还包括通道顺序、内存布局、数据类型和数值范围
     // 理论成立 BGR/HWC ->RGB/CHW 同时转换成float并归一化
     const int pixels = 640*640;
-    std::vector<float> chw(pixels * 3);
+
+    // 这里只是说明想开辟空间
+    // std::vector<float> chw(pixels * 3);
+    // 实际上可以写 
+    std::size_t input_bytes = chw.size() * sizeof(float);
+    void* device_input = nullptr;
     const unsigned char* bgr = resized.ptr<unsigned char>();
     for (int i = 0; i < pixels * 3; i+ = 3)
     {
@@ -272,6 +277,8 @@ int main()
 
     // 第十部分:检查Engine输入张量
     // engine->getNbIOTensors()返回Engine的输入张量与输出张量的总数量
+    const char* input_name = nullptr;
+    const char* output_name = nullptr;
     for(int i = 0;i < engine->getNbIOTensors();i++)
     {
         // getIOTensorName(i)返回的是字符串指针 所以用const char* name接受
@@ -280,14 +287,15 @@ int main()
         // getTensorIOMode(name)返回的是张量的输入输出模式
         // 用于判断张量是输入还是输出
         // KINPUT："输入"枚举值
-        if(engine -> getTensorIOMode(name) == nvinfer1::TensorIOMode::KINPUT)
+        if(engine -> getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
         {
+            input_name = name;
             std::cout<< "输入张量名称：" << name << "\n";
             // 获取张量数据类型
             // getTensorDataType(name)返回的是张量的数据类型
             // 用于判断张量是FP32还是FP16还是INT8
             // 先理解为这个输入张量的数据类型是不是FP32
-            if(engine -> getTensorDataTypename) == nvinfer1::DataType::kFLOAT)
+            if(engine -> getTensorDataType(name)) == nvinfer1::DataType::kFLOAT
             {
                 std::cout << "输入张量数据类型：FP32\n";
             }else{
@@ -295,12 +303,129 @@ int main()
                 std::cout << "输入张量数据类型：no FP32\n";
             }
         }   
+
+        //十三部分：获取输出张量
+        // 这个和上面一模一样 只是kouput表示输出
+        std::size_t output_count = 1;
+        if(engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kOUTPUT)
+        {
+            output_name = name;
+            if(output_name != nullptr)
+            {
+                // nvinfer::Dims是TensorRT定义的一个类型 专门用来保存张量的形状信息
+                nvinfer1::Dims output_shape = engine->getTensorShape(output_name);
+                // output_shape.nbDimes: 张量有多少个维度
+                // output_shape.d[i]: 第i个维度的大小
+                // 举例： 假设输出形状为（1,84,8400） 会一次输出1 84 8400
+                for(int i = 0;i < output_shape.nbDims;i++)
+                {
+                    //d[i]是Dims内部数组 用来保存每个维度大小
+                    //output_count *= static_cast<std::size_t>(output_shape.d[i]);等价于output_count = output_count * shape.d[i]
+                    output_count *= static_cast<std::size_t>(output_shape.d[i]);
+                    std::cout << output_shape.d[i] << " ";
+                }
+                if(engine -> getTensorDataType(name) == nvinfer1::DataType::kFLOAT)
+                {
+                    std::cout << "输出张量数据类型：FP32\n";
+                    nvinfer1::Dims output_shape = engine -> getTensorShape(output_name);
+                }else
+                {
+                    std::cerr << "输出张量数据类型：no FP32\n";
+                    delete context;
+                    delete engine;
+                    delete runtime;
+                    return 1;
+                }
+            }
+        }
+    }
+    // std::vector<float> chw(pixels * 3);
+    // std::size_t input_bytes = chw.size() * sizeof(float);最好
+    // 这个是在cpu中准备一个连续空间 用于保存好处理好的RGB/CHW数据
+    // 现在只是准备好模型输入数据 不等于我们现在的TensorRT可以带着这些数据执行GPU推理
+    // CUDA提供给我们一个接口：cudaMalloc（） 这个负责分配CUDA设备内存 供给GPU计算使用
+    // 注意：
+    // 即使Jetson的CPU、GPU共享物理内存 但是std::vctor的地址并不能因此无条件直接作为TensoRT的设备缓冲区地址
+    
+    // 向CUDA申请input——bytes 字节的设备内存
+    cudaError_t err = cudaMalloc(&device_input,input_bytes)
+
+    if(err != cudaSuccess)
+    {
+        std::cerr << "cudaMalloc失败\n"
+                  << cudaGetErrorString(err) << '\n';
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }
+
+    // 第十一部分：cudaMemcpy()
+    // 把处理好的图片张量复制到CUDA设备内存
+    // 函数原型
+    /* 
+        cudaError_t cudaMemcpy{ //返回cudaError_t 成功是cudaSuccess
+            void* dst, //目标内存地址
+            const void* src, //源内存地址
+            size_t count //要复制的字节数
+            cudaMemcpyKind kind //复制方向
+        // 注意
+        // cudaMalloc()负责申请空间 cudaMemcpy()责复制数据
+        // 复制方向：
+        // cudaMemcpyHostToDevice：从CPU内存复制到GPU内存
+        // cudaMemcpyDeviceToHost：从GPU内存复制到CPU内存
+        // cudaMemcpyDeviceToDevice：从GPU内存复制到GPU内存
+        // cudaMemcpyHostToHost：从CPU内存复制到CPU内存
+        }
+    */
+    cudaError_t err = cudaMemcpy(
+        device_input,// 刚刚申请的CUDA设备内存
+        chw.data(),// 保存RGB/CHW图片张量的CPU内存首地址
+        input_bytes,// 刚才计算的总字节数
+        cudaMemcpyHostToDevice// 复制方向
+    );
+    if(err != cudaSuccess)
+    {
+        std::cerr << "cudaMemcpy失败\n";
+                  << cudaGetErrorString(err) << '\n';
+        delete context;
+        delete engine;
+        delete runtime;
+        cudaFree(device_input);
+        return 1;
+    }
+
+    // 第十二部分：绑定TensrRT输入张量
+    if(input_name == nullptr)
+    {
+        std::cerr<< "没有找到张量\n";
+
+        delete context;
+        delete engine;
+        delete runtime;
+        cudaFree(device_input);
+        return 1;
+
+    }
+
+    // 细说context是一个指针变量 保存着IExecutionContext对象的地址
+    // 他指向推理上下文对象的指针
+    // context->setTensorAddress通过这个指针 调用推理上下文对象的成员函数
+    if(!context->setTensorAddress(input_name, device_input))
+    {
+        std::cerr << "setTensorAddress失败\n";
+        delete context;
+        delete engine;
+        delete runtime;
+        cudaFree(device_input);
+        return 1;
     }
 
     // 第部分：释放资源
     delete engine;
     delete runtime;
     delete context;
+    cudaFree(device_input)
 
     return 0;
 }
