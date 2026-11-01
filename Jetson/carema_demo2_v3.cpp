@@ -1,6 +1,5 @@
-
-#include <NvInfer.h>
 #include <cuda_runtime_api.h>
+#include <NvInfer.h>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <cstdio>
@@ -225,7 +224,7 @@ int main()
 
     // 第七部分 打开一张图片
     cv::Mat image = cv::imread(
-        "/workspace/RoadToEmbedded/Jetson/Demo1_Camera/first.jpg",
+        "~/RoadToEmbedded/Jetson/Demo1_Camera/first.jpg",
         cv::IMREAD_COLOR
     );
 
@@ -263,14 +262,13 @@ int main()
     const int pixels = 640*640;
 
     // 这里只是说明想开辟空间
-    // std::vector<float> chw(pixels * 3);
-    // 实际上可以写 
     std::vector<float> chw(pixels * 3);
+    // 实际上可以写 
     std::size_t input_bytes = chw.size() * sizeof(float);
     void* device_input = nullptr;
     const unsigned char* bgr = resized.ptr<unsigned char>();
     int j = 0;
-    for (int i = 0; i < pixels * 3; i += 3)
+    for (int i = 0; i < pixels * 3; i+= 3)
     {
         chw[j] = bgr[i + 2] / 255.0f; //R
         chw[pixels + j] = bgr[i + 1] / 255.0f;  //G
@@ -335,8 +333,12 @@ int main()
                 // 举例： 假设输出形状为（1,84,8400） 会一次输出1 84 8400
                 for(int i = 0;i < output_shape.nbDims;i++)
                 {
-                    //d[i]是Dims内部数组 用来保存每个维度大小
-                    //output_count *= static_cast<std::size_t>(output_shape.d[i]);等价于output_count = output_count * shape.d[i]
+                    // d[i]是Dims内部数组 用来保存每个维度大小
+                    // output_count *= static_cast<std::size_t>(output_shape.d[i]);等价于output_count = output_count * shape.d[i]
+                    // 作用是检查维度是否合法 防止计算张量元素数量时整数溢出
+                    // 下面那句是假设最大100 此时count=30 d[i]=4 30>100/4超范围
+                    // std::numeric_limits<std::size_t>::max() size_t最大值
+                    // static_cast<std::size_t>(output_shape.d[i])显示转换为size_t类型
                     if (output_shape.d[i] <= 0 ||
                         output_count > std::numeric_limits<std::size_t>::max() /
                             static_cast<std::size_t>(output_shape.d[i]))
@@ -353,6 +355,7 @@ int main()
                 if(engine -> getTensorDataType(name) == nvinfer1::DataType::kFLOAT)
                 {
                     std::cout << "输出张量数据类型：FP32\n";
+                    nvinfer1::Dims output_shape = engine -> getTensorShape(output_name);
                 }else
                 {
                     std::cerr << "输出张量数据类型：no FP32\n";
@@ -413,10 +416,10 @@ int main()
     {
         std::cerr << "cudaMemcpy失败\n"
                   << cudaGetErrorString(err) << '\n';
-        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
+        cudaFree(device_input);
         return 1;
     }
 
@@ -425,10 +428,10 @@ int main()
     {
         std::cerr<< "没有找到张量\n";
 
-        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
+        cudaFree(device_input);
         return 1;
 
     }
@@ -439,10 +442,10 @@ int main()
     if(!context->setTensorAddress(input_name, device_input))
     {
         std::cerr << "setTensorAddress失败\n";
-        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
+        cudaFree(device_input);
         return 1;
     }
     //第十三部分续： 申请输出CUDA内存
@@ -463,14 +466,25 @@ int main()
     {
         std::cerr << "cudaMalloc失败\n"
                   << cudaGetErrorString(err) << '\n';
-        cudaFree(device_input);
         delete context;
         delete engine;
         delete runtime;
+        cudaFree(device_input);
         return 1;
     }
 
     //第十四部分：绑定输出张量
+    if(output_name == nullptr)
+    {
+        std::cerr<< "没有找到张量\n";
+
+        delete context;
+        delete engine;
+        delete runtime;
+        cudaFree(device_input);
+        return 1;
+
+    }
     if(!context -> setTensorAddress(output_name, device_output))
     {
         std::cerr << "setTensorAddress失败\n";
@@ -482,9 +496,31 @@ int main()
         return 1;
     }
 
+    // 第十五部分： 创建CUDA Stream
+    // cudaStream_t是CUDA定义的流句柄类型
+    // cudaStreamCreate()负责创建流
+    // &stream就是把变量的地址传回去 让函数把创建的句柄写回来
+    // err接收错误码，后面要判断是不是cudaSuccess
+    cudaStream_t stream = nullptr;
+    if(cudaStreamCreate(&stream) != cudaSuccess)
+    {
+        std::cerr << "cudaStreamCreate失败\n";
+        cudaFree(device_input);
+        cudaFree(device_output);
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }
+
+    // 第十六部分：
+
     // 第部分：释放资源
+    cudaStreamDestroy(stream);
+
     cudaFree(device_output);
     cudaFree(device_input);
+
     delete context;
     delete engine;
     delete runtime;
