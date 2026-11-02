@@ -513,7 +513,41 @@ int main()
         return 1;
     }
 
-    // 第十六部分：
+    // 第十六部分：enqueueV3()执行推理
+    // 就是让TensorRT使用已绑定的输入输出内存 向指定的CUDA Stream提交模型推理任务
+    // 但是enqueueV3（）是异步接口 返回成功不代表GPU已经算万 
+    // 后面必须处理CUDA同比和错误路径 才能安全读取结果 释放内存
+    if(!context->enqueueV3(stream))
+    {
+        std::cerr << "enqueueV3失败\n";
+        cudaStreamDestroy(stream);
+        cudaFree(device_input);
+        cudaFree(device_output);
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }
+
+    // 第十七部分：等待GPU推理完成
+    //cudaStreamSynchronize（stream）是等待该CUDAStream已提交的工作执行完成
+    if(cudaStreamSynchronize(stream) != cudaSuccess)
+    {
+        std::cerr << "cudaStreamSynchronize失败\n";
+        cudaStreamDestroy(stream);
+        cudaFree(device_input);
+        cudaFree(device_output);
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }
+
+    // 第十八部分： GPU->CPU 读取yolo推理结果
+    // 这句话不是申请output_count个字节 而是申请output_count个float元素
+    // 假设output_count=3 那么std::vector<float> output(3) 
+    // 就是 3*sizeof(float)=3*4=12字节
+    std::vector<float>
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
