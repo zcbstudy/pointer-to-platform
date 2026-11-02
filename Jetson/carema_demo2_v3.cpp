@@ -201,8 +201,8 @@ int main()
     // engine：接收反序列化返回的引擎对象指针
     nvinfer1::ICudaEngine* engine =
         runtime->deserializeCudaEngine(
-            engine_data.data(),
-            engine_data.size()
+            engine_data.data()+engine_offset,
+            engine_data.size()-engine_offset
         );
 
     // 第五部分：检查 Engine 是否创建成功
