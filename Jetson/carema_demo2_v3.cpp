@@ -585,6 +585,40 @@ int main()
         std::cout << "output[" << i << "] = " << output[i] << '\n';
     }
 
+    //当前流程已跑通
+    //输出结果：
+    /*
+    root@3db1b0fb16bd:/workspace/RoadToEmbedded/pointer-to-platform# ./yolo_infer
+    文件读取成功
+    文件大小：22602034 字节
+    [TensorRT] Using an engine plan file across different models of devices is not recommended and is likely to affect performance or even cause errors.
+    TensorRT Engine 创建成功
+    输入张量名称：images
+    输入张量数据类型：FP32
+    1 84 8400 输出张量数据类型：FP32
+    输出元素总数：705600
+    output[0] = 11.3389
+    output[1] = 13.8867
+    output[2] = 17.0977
+    output[3] = 25.1719
+    output[4] = 28.4375
+    output[5] = 34.0625
+    output[6] = 49.0391
+    output[7] = 56.75
+    output[8] = 63.6641
+    output[9] = 74.25
+    root@3db1b0fb16bd:/workspace/RoadToEmbedded/pointer-to-platform# 
+    */
+
+    //第二十部分 理解yolo输出张量
+    //（1,84,8400）：
+    //1张图像 84属性通道（每个候选狂的属性） 8400候选位置
+    // 84 = 4 + 80
+    // 4个边界框坐标 80个类别分数
+    //对于典型的COCO80类YOLO原始检测输出
+    // 对于我output 0-9 不是第一个目标的是个不同属性 而是第一个属性通道中1i俺是个候选位置数值
+    // 
+
     // 第部分：释放资源
     cudaStreamDestroy(stream);
 
