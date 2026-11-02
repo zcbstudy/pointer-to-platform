@@ -183,6 +183,15 @@ int main()
         std::cerr << "Runtime 创建失败\n";
         return 1;
     }
+    // 第三部分补充：跳过当前Ultralytics写入的元数据
+    // 当前yolo26s.engine已确认 4字节长度信息 +1922字节的json
+    const std::size_t engine_offset = 4 + 1922;
+    if(engine_data.size() <= engine_offset)
+    {
+        std::cerr << "Engine 数据长度不足\n";
+        delete runtime;
+        return 1;
+    }
 
     // 第四部分：反序列化，创建 TensorRT Engine
     // 反序列化：把二进制数据恢复成 TensorRT Engine
@@ -548,7 +557,12 @@ int main()
     // 假设output_count=3 那么std::vector<float> output(3) 
     // 就是 3*sizeof(float)=3*4=12字节
     std::vector<float> output(output_count);
-    // oupput.data()是cpu输出数组的首地址 device_output是GPU输出缓冲区的首地址 ouyput_bytes是需要复制的总字节数
+    // oupput.data()是cpu接收缓冲端的首地址 device_output是GPU输出缓冲区的首地址 ouyput_bytes是需要复制的总字节数
+    // output.data[]是什么 他是返回vector内部连续存储区域的首地址 返回float类型
+    // device_output：GPU 内存中已经保存了 TensorRT 的输出张量。
+    // output.data()：告诉 CUDA，CPU 内存的接收位置在哪里。
+    // cudaMemcpy()：真正执行数据复制。
+    // 复制成功后，就可以通过 output[0]、output[1] 等读取这些浮点数
     if(cudaMemcpy(output.data(), device_output, output_bytes, cudaMemcpyDeviceToHost) != cudaSuccess)
     {
         std::cerr << "cudaMemcpy失败\n";
@@ -560,6 +574,16 @@ int main()
         delete runtime;
         return 1;
     }  
+    // 第十九部分：查看YOLO原始推理结果
+    // output.size() 返回CPU数组中float元素的数量
+    // output[i] 读取第i个float元素
+
+    std::cout << "输出元素总数：" << output.size() << '\n';
+
+    for (std::size_t i = 0; i < output.size() && i < 10; i++)
+    {
+        std::cout << "output[" << i << "] = " << output[i] << '\n';
+    }
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
