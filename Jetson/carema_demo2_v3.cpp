@@ -233,7 +233,7 @@ int main()
 
     // 第七部分 打开一张图片
     cv::Mat image = cv::imread(
-        "~/RoadToEmbedded/Jetson/Demo1_Camera/first.jpg",
+        "/RoadToEmbedded/Jetson/Demo1_Camera/first.jpg",
         cv::IMREAD_COLOR
     );
 
