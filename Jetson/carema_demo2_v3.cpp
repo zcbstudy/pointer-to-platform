@@ -547,7 +547,19 @@ int main()
     // 这句话不是申请output_count个字节 而是申请output_count个float元素
     // 假设output_count=3 那么std::vector<float> output(3) 
     // 就是 3*sizeof(float)=3*4=12字节
-    std::vector<float>
+    std::vector<float> output(output_count);
+    // oupput.data()是cpu输出数组的首地址 device_output是GPU输出缓冲区的首地址 ouyput_bytes是需要复制的总字节数
+    if(cudaMemcpy(output.data(), device_output, output_bytes, cudaMemcpyDeviceToHost) != cudaSuccess)
+    {
+        std::cerr << "cudaMemcpy失败\n";
+        cudaStreamDestroy(stream);
+        cudaFree(device_input);
+        cudaFree(device_output);
+        delete context;
+        delete engine;
+        delete runtime;
+        return 1;
+    }  
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
