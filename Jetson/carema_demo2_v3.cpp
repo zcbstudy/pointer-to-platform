@@ -730,7 +730,7 @@ int main()
     std::cout << "保存的原始候选预测数量："
                   << detections.size() << '\n';
     std::cout << "保存的阈值筛选后候选预测数量："
-                  << detections.size() << '\n';
+                  << filtered.size() << '\n';
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
