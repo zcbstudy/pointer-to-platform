@@ -731,6 +731,22 @@ int main()
                   << detections.size() << '\n';
     std::cout << "保存的阈值筛选后候选预测数量："
                   << filtered.size() << '\n';
+    // 第24部分 验证候选框坐标
+    if (!filtered.empty())
+    {
+        const Detection& d = filtered[0];
+
+        float x1 = d.x - d.w / 2.0f;
+        float y1 = d.y - d.h / 2.0f;
+        float x2 = d.x + d.w / 2.0f;
+        float y2 = d.y + d.h / 2.0f;
+
+        std::cout << "候选框左上角：" << x1 << ", " << y1 << '\n';
+        std::cout << "候选框右下角：" << x2 << ", " << y2 << '\n';
+        std::cout << "类别：" << d.class_id
+                  << " 分数：" << d.score << '\n';
+    }
+
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
