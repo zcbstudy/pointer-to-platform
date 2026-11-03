@@ -616,8 +616,53 @@ int main()
     // 84 = 4 + 80
     // 4个边界框坐标 80个类别分数
     //对于典型的COCO80类YOLO原始检测输出
-    // 对于我output 0-9 不是第一个目标的是个不同属性 而是第一个属性通道中1i俺是个候选位置数值
-    // 
+    // 对于我output 0-9 不是第一个目标的是个不同属性 而是第一个属性通道中前十个候选位置数值
+    // 实际上output数组的前四个属性通道并不好似一个框的xywh
+    // 属性x是output[0-8399]
+    // 属性y是output[8400-16799]
+    // 属性w是output[16800-25199]
+    // 属性h是output[25200-33599]
+
+    // 第0类分数：output[33600]~output[41999]
+    // 第1类分数：output[42000]~output[50399]
+    // 第2类分数：output[50400]~output[58799]
+    // yolo的这个输出布局连续输出8400x8400y接着是wh等其他的
+
+    // 第21部分 初步验证yolo的检测结果
+    // 找出yolo分数最高的候选框
+    // 当前不绘制检测框 只找出模型最有把握的一个预测
+    // 当前不是通用版 直接按照我的输出来  当前engine输出形状为（1,84,8400）
+    // 8400个候选位置 每个位置对应80个类别分数
+    const int candidates = 8400;
+    const int classes = 80;
+    // best_score 保存目前找到的最高列别分数 初始化是为了表示尚未找到有效分数
+    // best_vlass 是保存最高分对应的类别编号 初始化是为了表示有效类别编号从0开始
+    // best_i是保存最高分对应的候选位置编号 初始化是说有效候选编号从0开始
+    float best_score = -0.1f;
+    int best_class = -1;
+    int best_i = -1;
+    // 便利全部候选位置
+    for(int i = 0;i<candidates;i++)
+    {
+        // 遍历这个候选位置的全部类别
+        for(int c = 0;c<classes;c++)
+        {
+            //4:跳过XYWH四个坐标属性
+            //(4+c)*candidates这个可以到对应的第x个类别分数 加i是第x号候选框
+            float score = output[(4+c)*candidates+i];
+            if(score > best_score)
+            {
+                best_score = score;
+                best_class = c;
+                best_i = i;
+            }
+        }
+    }
+    std::cout<<"最高类别分数"<<best_score<<'\n';
+    std::cout<<"最高类别编号："<<best_class<<'\n';
+    std::cout<<"最高类别位置："<<best_i<<'\n';
+
+
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
