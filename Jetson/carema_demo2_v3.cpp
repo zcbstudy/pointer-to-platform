@@ -874,6 +874,32 @@ int main()
         std::cout << "宽高：" << d.w << ", " << d.h << '\n';
     }
 
+    //第二十八部分 NMS检测结果可视化
+    //复制一份图像来 省着修改了前面第七还是第八部分的resized
+    cv::Mat draw_img = resized.clone();
+    // 遍历NMS后的检测结果
+    for (const Detection& d : nms_detections)
+    {
+        // 计算左上角和右下角坐标
+        float x1 = d.x - d.w / 2.0f;
+        float y1 = d.y - d.h / 2.0f;
+        float x2 = d.x + d.w / 2.0f;
+        float y2 = d.y + d.h / 2.0f;
+        // 绘制矩形框
+        cv::rectangle(draw_img, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 0), 2);
+        // 绘制类别和置信度
+        // std::string 声明字符串变量
+        // std::to_string(d.class_id) std::to_string(d.score)
+        // 这俩是把证书类别ID和浮点数置信度转换成字符串
+        std::string label = std::to_string(d.class_id) + " " + std::to_string(d.score);
+        // 文字画在图像上     
+        // cv::putText(图像, 文本, 位置, 字体, 字体大小, 颜色, 线宽)
+        cv::putText(draw_img, label, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
+    }
+    // 显示结果
+    cv::imwrite("nms_result.jpg", draw_img);
+
+
     // 第部分：释放资源
     cudaStreamDestroy(stream);
 
