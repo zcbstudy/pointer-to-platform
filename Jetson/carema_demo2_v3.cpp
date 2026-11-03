@@ -732,20 +732,28 @@ int main()
     std::cout << "保存的阈值筛选后候选预测数量："
                   << filtered.size() << '\n';
     // 第24部分 验证候选框坐标
-    if (!filtered.empty())
+    // 第二十四部分：遍历筛选后的候选框，转换XYWH坐标
+    for (std::size_t i = 0; i < filtered.size(); i++)
     {
-        const Detection& d = filtered[0];
+        //filtered[i]表示 filtered 数组中的第 i 个 Detection 结构体对象
+        // const Detection&d 让 d 成为 filtered[i] 这个对象的另一个名字
+        // 比如修改d.score实际上修改filtered[i] .score
+        // const表示不允许d修改这个Detection对象 就是只读 而且别的方法定义d会复制结构体 我们不希望 所以采用这个
+        const Detection& d = filtered[i];
 
         float x1 = d.x - d.w / 2.0f;
         float y1 = d.y - d.h / 2.0f;
         float x2 = d.x + d.w / 2.0f;
         float y2 = d.y + d.h / 2.0f;
 
-        std::cout << "候选框左上角：" << x1 << ", " << y1 << '\n';
-        std::cout << "候选框右下角：" << x2 << ", " << y2 << '\n';
-        std::cout << "类别：" << d.class_id
-                  << " 分数：" << d.score << '\n';
-    }
+    // 后续在这里使用坐标进行NMS或绘制
+    // 想明白NMS先明白IoU
+    // 说为啥整这破玩意
+    // 我现在1018个预测 可能几百个框围着一个人 所以我们要判断两个框到底重叠了多少
+    // IoU怎么计算：
+    // IoU = 两个框的交集面积 / 两个框的并集面积
+    // 并集面积 =两个框面积之和 - 交集面积
+}
 
 
     // 第部分：释放资源
