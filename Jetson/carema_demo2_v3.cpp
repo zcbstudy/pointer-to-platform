@@ -865,6 +865,15 @@ int main()
     std::cout << "NMS前候选框数量：" << filtered.size() << '\n';
     std::cout << "NMS后保留框数量：" << nms_detections.size() << '\n';    
 
+    // 第二十八部分：检查NMS最终检测结果
+    for (const Detection& d : nms_detections)
+    {
+        std::cout << "类别ID：" << d.class_id << '\n';
+        std::cout << "置信度：" << d.score << '\n';
+        std::cout << "中心坐标：" << d.x << ", " << d.y << '\n';
+        std::cout << "宽高：" << d.w << ", " << d.h << '\n';
+    }
+
     // 第部分：释放资源
     cudaStreamDestroy(stream);
 
