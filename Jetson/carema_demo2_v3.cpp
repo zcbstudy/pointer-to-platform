@@ -290,6 +290,7 @@ int main()
     const char* input_name = nullptr;
     const char* output_name = nullptr;
     std::size_t output_count = 0;
+    nvinfer1::Dims output_shape{};
     for(int i = 0;i < engine->getNbIOTensors();i++)
     {
         // getIOTensorName(i)返回的是字符串指针 所以用const char* name接受
@@ -328,7 +329,7 @@ int main()
             if(output_name != nullptr)
             {
                 // nvinfer::Dims是TensorRT定义的一个类型 专门用来保存张量的形状信息
-                nvinfer1::Dims output_shape = engine->getTensorShape(output_name);
+                output_shape = engine->getTensorShape(output_name);
                 if (output_shape.nbDims <= 0)
                 {
                     std::cerr << "输出形状无效\n";
@@ -364,7 +365,7 @@ int main()
                 if(engine -> getTensorDataType(name) == nvinfer1::DataType::kFLOAT)
                 {
                     std::cout << "输出张量数据类型：FP32\n";
-                    nvinfer1::Dims output_shape = engine -> getTensorShape(output_name);
+                    output_shape = engine -> getTensorShape(output_name);
                 }else
                 {
                     std::cerr << "输出张量数据类型：no FP32\n";
@@ -629,13 +630,33 @@ int main()
     // yolo的这个输出布局连续输出8400x8400y接着是wh等其他的
 
     // 第21部分 初步验证yolo的检测结果
-    // 找出yolo分数最高的候选框
+    /*// 找出yolo分数最高的候选框
     // 当前不绘制检测框 只找出模型最有把握的一个预测
     // 当前不是通用版 直接按照我的输出来  当前engine输出形状为（1,84,8400）
     // 8400个候选位置 每个位置对应80个类别分数
     const int candidates = 8400;
     const int classes = 80;
-    // best_score 保存目前找到的最高列别分数 初始化是为了表示尚未找到有效分数
+    */
+    //当前改为任意图片 但是解码还是这个3类别模型 比如(1,7,8400)
+    //当前仅支持[1,4+类别数，候选数]的原始检测输出
+    // 不是3维张量||不是单张图片||没有足够的属性通道容纳至少一个类别分数||候选位置数量无效
+    if (output_shape.nbDims !=3 ||
+        output_shape.d[0] != 1 ||
+        output_shape.d[1] <= 4 ||
+        output_shape.d[2] <= 0)
+        {
+            std::cerr << "输出张量形状不合法\n";
+            cudaStreamDestroy(stream);
+            cudaFree(device_input);
+            cudaFree(device_output);
+            delete context;
+            delete engine;
+            delete runtime;
+            return 1;
+        }
+    const int candidates = output_shape.d[2];
+    const int classes = output_shape.d[1] - 4;
+    /*// best_score 保存目前找到的最高列别分数 初始化是为了表示尚未找到有效分数
     // best_vlass 是保存最高分对应的类别编号 初始化是为了表示有效类别编号从0开始
     // best_i是保存最高分对应的候选位置编号 初始化是说有效候选编号从0开始
     float best_score = -0.1f;
@@ -661,8 +682,55 @@ int main()
     std::cout<<"最高类别分数"<<best_score<<'\n';
     std::cout<<"最高类别编号："<<best_class<<'\n';
     std::cout<<"最高类别位置："<<best_i<<'\n';
-
-
+    */
+    // 每个候选位置独立查找最高类别分数
+    // 至于为什么8400是那个candidates？（1,84,8400）可以理解为一个84行 8400列的数据表
+    // 因为yolo的输出是8400个候选位置 每个位置对应80个类别分数
+    // 所以8400是候选位置数量
+    struct Detection
+    {
+        int canddate_id;
+        int class_id;
+        float score;
+        float x,y,w,h;
+    };
+    std::vector<Detection> detections;
+    std::vector<Detection> filtered;
+    for(int i = 0; i < candidates; i++)
+    {
+        //每次进入新的候选位置 都要进行重新初始化
+        float best_score = -1.0f;
+        int best_class = -1;
+        for(int c = 0; c < classes; c++)
+        {
+            float score = output[(4+c)*candidates+i];
+            if(score > best_score)
+            {
+                best_score = score;
+                best_class = c;
+            }
+        }
+        float x = output[0 * candidates + i];
+        float y = output[1 * candidates + i];
+        float w = output[2 * candidates + i];
+        float h = output[3 * candidates + i];
+        // 按照Detection结构体成员的顺序 创建一个对象并追加到vector末尾
+        detections.push_back({i, best_class, best_score, x, y, w, h});
+        
+        // filtered 保存通过阈值筛选的候选预测
+        const float conf_threshold = 0.25f;
+        for(std::size_t i = 0; i < detections.size(); i++)
+        {
+            if(detections[i].score >= conf_threshold)
+            {
+                filtered.push_back(detections[i]);
+            }
+        }
+        std::cout << "保存的原始候选预测数量："
+                  << detections.size() << '\n';
+        std::cout << "保存的阈值筛选后候选预测数量："
+                  << detections.size() << '\n';
+    }
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
