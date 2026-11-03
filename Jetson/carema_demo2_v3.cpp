@@ -7,13 +7,66 @@
 #include <iostream>
 #include <limits>
 #include <vector>
+#include <algorithm>
 // std::vecor本质上是C++标准库提供的[动态数组容器]
 // c语言分配内存 大多是malloc 最后还要free
 // C++中一般用std::vector 因为可以自动管理内存 
 // 例子 std::vector<char> data(5)
 // 指定容器中元素的类型为char 5个元素 对象名字叫data
 
+struct Detection
+    {
+        int canddate_id;
+        int class_id;
+        float score;
+        float x,y,w,h;
+    };
 
+// 第二十五部分：计算两个检测框的IoU
+// IoU = 两个框的交集面积 / 两个框的并集面积
+// 交集面积 = 交集矩形的宽 * 交集矩形的高
+// 并集面积 = 两个框的面积之和 - 交集面积
+float calculateIoU(const Detection& a, const Detection& b)
+{
+    // 第一部分：XYWH转换为左上角和右下角坐标
+    float ax1 = a.x - a.w / 2.0f;
+    float ay1 = a.y - a.h / 2.0f;
+    float ax2 = a.x + a.w / 2.0f;
+    float ay2 = a.y + a.h / 2.0f;
+
+    float bx1 = b.x - b.w / 2.0f;
+    float by1 = b.y - b.h / 2.0f;
+    float bx2 = b.x + b.w / 2.0f;
+    float by2 = b.y + b.h / 2.0f;
+
+    // 第二部分：计算交集矩形边界
+    float left = std::max(ax1, bx1);
+    float top = std::max(ay1, by1);
+    float right = std::min(ax2, bx2);
+    float bottom = std::min(ay2, by2);
+
+    // 第三部分：计算交集面积
+    float inter_w = std::max(0.0f, right - left);
+    float inter_h = std::max(0.0f, bottom - top);
+
+    float inter_area = inter_w * inter_h;
+
+    // 第四部分：计算两个矩形面积
+    float area_a = std::max(0.0f, a.w) * std::max(0.0f, a.h);
+    float area_b = std::max(0.0f, b.w) * std::max(0.0f, b.h);
+
+    // 第五部分：计算并集面积
+    float union_area = area_a + area_b - inter_area;
+
+    // 防止除以0
+    if (union_area <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    // 第六部分：计算IoU
+    return inter_area / union_area;
+}
 
 // TensorRT 日志记录器
 // class Logger定义一个类叫做Logger nvinfer1::ILogger是TensorRT的日志接口
@@ -687,13 +740,7 @@ int main()
     // 至于为什么8400是那个candidates？（1,84,8400）可以理解为一个84行 8400列的数据表
     // 因为yolo的输出是8400个候选位置 每个位置对应80个类别分数
     // 所以8400是候选位置数量
-    struct Detection
-    {
-        int canddate_id;
-        int class_id;
-        float score;
-        float x,y,w,h;
-    };
+    
     std::vector<Detection> detections;
     std::vector<Detection> filtered;
     for(int i = 0; i < candidates; i++)
@@ -746,15 +793,77 @@ int main()
         float x2 = d.x + d.w / 2.0f;
         float y2 = d.y + d.h / 2.0f;
 
-    // 后续在这里使用坐标进行NMS或绘制
-    // 想明白NMS先明白IoU
-    // 说为啥整这破玩意
-    // 我现在1018个预测 可能几百个框围着一个人 所以我们要判断两个框到底重叠了多少
-    // IoU怎么计算：
-    // IoU = 两个框的交集面积 / 两个框的并集面积
-    // 并集面积 =两个框面积之和 - 交集面积
-}
+        // 后续在这里使用坐标进行NMS或绘制
+        // 想明白NMS先明白IoU
+        // 说为啥整这破玩意
+        // 我现在1018个预测 可能几百个框围着一个人 所以我们要判断两个框到底重叠了多少
+        // IoU怎么计算：
+        // IoU = 两个框的交集面积 / 两个框的并集面积
+        // 并集面积 =两个框面积之和 - 交集面积
+    }
 
+    // 第二十六部分：NMS前按照类别分数降序排序
+    // std::sort是C++标准库提供的排序算法
+    // 。begin和。end是排序范围的开始/结束迭代器 指向最后一个元素之后的位置
+    /* [](const Detection& a, const Detection& b)
+    {
+        return a.score > b.score;
+    }
+    );*/
+    //这里[]是Lambda表达式 可理解为一个没有单独命名的小函数 接受两个结构体的只读引用 比较分数
+    std::sort(filtered.begin(), filtered.end(),
+        [](const Detection& a, const Detection& b)
+    {
+        return a.score > b.score;
+    }
+    );
+    //验证排序：打印排序后的最高分
+    if (!filtered.empty())
+    {
+        std::cout << "排序后的最高分："
+                  << filtered[0].score << '\n';
+    }
+
+    // 第二十七部分：NMS非极大值抑制
+    //当前结构体以按照sore从高向低排列
+    // 这个是IOU的S的阈值 和刚才阈值不是一个
+    const float iou_threshold = 0.45f;
+    // 记录候选框是否已经被抑制
+    std::vector<bool> suppressed(filtered.size(), false);
+    // 保存NMS后的检测结果
+    std::vector<Detection> nms_detections;
+    for(std::size_t i =0; i < filtered.size(); i++)
+    {
+        //如果抑制 返回ture 可运行这个if 初始化没抑制为flase
+        if(suppressed[i])
+        {
+            continue;
+        }
+        // 如果没抑制保留
+        nms_detections.push_back(filtered[i]);
+        // 可以与后面更低的候选框进行比较
+        for(std::size_t j = 0; j < filtered.size(); j++)
+        {
+            if(suppressed[j])
+            {
+                continue;
+            }
+            //不同种类不互相抑制
+            if(filtered[i].class_id != filtered[j].class_id)
+            {
+                continue;
+            }
+            //计算两个框的IoU
+            float iou = calculateIoU(filtered[i], filtered[j]);
+
+            if(iou > iou_threshold)
+            {
+                suppressed[j] = true;
+            }
+        }
+    }
+    std::cout << "NMS前候选框数量：" << filtered.size() << '\n';
+    std::cout << "NMS后保留框数量：" << nms_detections.size() << '\n';    
 
     // 第部分：释放资源
     cudaStreamDestroy(stream);
