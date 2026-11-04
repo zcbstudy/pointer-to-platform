@@ -1,0 +1,4 @@
+--2026-10-19 22:11:08--  https://download.mozilla.org/?product=firefox-latest
+Connecting to 127.0.0.1:7890... connected.
+OpenSSL: error:0A000126:SSL routines::unexpected eof while reading
+Unable to establish SSL connection.
