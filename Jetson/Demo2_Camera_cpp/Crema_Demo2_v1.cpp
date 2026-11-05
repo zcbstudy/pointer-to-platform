@@ -419,7 +419,32 @@ bool initTensorRT(TrnsorRTState& trt)
         std::cerr << "张量信息不完整\n";
         return false;
     }
+    // 获取Engine输入张量的形状
+    nvinfer1::Dims input_shape =
+    trt.engine->getTensorShape(trt.input_name);
+    // 当前模型使用固定输入：[1,3,640,640]，FP32
+    if (input_shape.nbDims != 4 ||
+        input_shape.d[0] != 1 ||
+        input_shape.d[1] != 3 ||
+        input_shape.d[2] != 640 ||
+        input_shape.d[3] != 640 ||
+        trt.engine->getTensorDataType(trt.input_name)
+            != nvinfer1::DataType::kFLOAT)
+    {
+        std::cerr << "输入张量形状或数据类型不符合预期\n";
+        return false;
+    }
 
+    // 根据实际查询到的形状计算输入数据字节数
+    trt.input_bytes =
+        static_cast<std::size_t>(input_shape.d[0]) *
+        input_shape.d[1] *
+        input_shape.d[2] *
+        input_shape.d[3] *
+        sizeof(float);
+
+    std::cout << "GPU输入缓冲区需要："
+              << trt.input_bytes << " 字节\n";
     return true;
 }
 
@@ -540,7 +565,20 @@ void yolo_worker()
 		return;
 	}
 
-	
+	const int pixels = 640 * 640;
+    // CPU端输入张量缓冲区
+    std::vector<float> chw(pixels * 3);
+    // 输入张量的字节大小
+    std::size_t input_bytes = chw.size() * sizeof(float);
+    // 检查CPU缓冲区与Engine输入数据大小是否匹配
+    if (input_bytes != trt.input_bytes)
+    {
+        std::cerr << "CPU缓冲区大小与TensorRT输入不匹配\n";
+
+        request_stop();
+        cleanupTensorRT(trt);
+        return;
+    }
 	while(true)
 	{
 		//每一轮创建一个新的，初始化为空的MAt
@@ -578,7 +616,29 @@ void yolo_worker()
 		//第七部分：接收摄像头线程提供的图像
 		const cv::Mat& image = work;
 
+        //第八部分：调整尺寸
+        cv::Mat resized;
+        cv::resize(
+            image,
+            resized,
+            cv::Size(640, 640)
+        );
 
+        // 确保图像数据连续存储
+        if (!resized.isContinuous())
+        {
+            resized = resized.clone();
+        }
+
+        const unsigned char* bgr = resized.ptr<unsigned char>();
+        int j = 0;
+        for (int i = 0; i < pixels * 3; i+= 3)
+        {
+            chw[j] = bgr[i + 2] / 255.0f; //R
+            chw[pixels + j] = bgr[i + 1] / 255.0f;  //G
+            chw[2 * pixels + j] = bgr[i] / 255.0f;  //B
+            j++;
+        }
 
 		cv::imshow("Carema-press q to quit",work);
 
