@@ -27,6 +27,30 @@ struct Detection
         float x,y,w,h;
     };
 
+// TensorRT 日志记录器
+// class Logger定义一个类叫做Logger nvinfer1::ILogger是TensorRT的日志接口
+// 这个类继承自nvinfer1::ILogger，并重写了log函数
+class Logger : public nvinfer1::ILogger
+{
+//  public不是函数 不是变量 是访问权限标签 告诉编译器 后面声明的成员可以被外部代码访问
+public:
+    // 实现了ILogger要求的log()函数 
+    // override是告诉编译器这个函数是重写基类的虚函数，检查这个函数是否匹配
+    // noexcept表示这个函数不会抛出异常
+    // 参数：severity 日志级别，msg 日志内容
+    void log(Severity severity, const char* msg) noexcept override
+    {
+        // severity 函数收到的参数 表示这条日志的严重程度
+        // Severity::kWARNING 是 TensorRt定义的一个日志级别
+        if (severity <= Severity::kWARNING)
+        {
+            // msg 输出TensorRT传进来的具体日志文字
+            std::cerr << "[TensorRT] " << msg << '\n';
+        }
+    }
+};
+
+
 //定义一个结构体集中管理资源
 struct TrnsorRTState
 {
@@ -97,29 +121,6 @@ float calculateIoU(const Detection& a, const Detection& b)
     // 第六部分：计算IoU
     return inter_area / union_area;
 }
-
-// TensorRT 日志记录器
-// class Logger定义一个类叫做Logger nvinfer1::ILogger是TensorRT的日志接口
-// 这个类继承自nvinfer1::ILogger，并重写了log函数
-class Logger : public nvinfer1::ILogger
-{
-//  public不是函数 不是变量 是访问权限标签 告诉编译器 后面声明的成员可以被外部代码访问
-public:
-    // 实现了ILogger要求的log()函数 
-    // override是告诉编译器这个函数是重写基类的虚函数，检查这个函数是否匹配
-    // noexcept表示这个函数不会抛出异常
-    // 参数：severity 日志级别，msg 日志内容
-    void log(Severity severity, const char* msg) noexcept override
-    {
-        // severity 函数收到的参数 表示这条日志的严重程度
-        // Severity::kWARNING 是 TensorRt定义的一个日志级别
-        if (severity <= Severity::kWARNING)
-        {
-            // msg 输出TensorRT传进来的具体日志文字
-            std::cerr << "[TensorRT] " << msg << '\n';
-        }
-    }
-};
 
 // 究竟为什么用这个函数 分为以下几点
 // 1.首先engine文件在ssd上 我们目的是实现engine反序列化形成TenSorRT文件
@@ -223,6 +224,18 @@ bool loadBinaryFile(const char* path, std::vector<char>& data)
 
     return true;
 }
+//摄像头发布的前一帧
+cv::Mat latest_frame;
+//通知消费者有新帧，或者程序需推出
+std::condition_variable frame_cv;
+//保护共享图片及状态
+std::mutex frame_mutex;
+//是否存在尚未被取走的新帧
+bool has_new_frame = false;
+//是否请求停止程序
+bool stop = false;
+
+
 // 定义个停止操作
 void request_stop()
 {
@@ -397,6 +410,17 @@ bool initTensorRT(TrnsorRTState& trt)
             }
         }
     }
+
+    // 初始化完成前，检查输入输出张量信息是否齐全
+    if (trt.input_name == nullptr ||
+        trt.output_name == nullptr ||
+        trt.output_count == 0)
+    {
+        std::cerr << "张量信息不完整\n";
+        return false;
+    }
+
+    return true;
 }
 
 // 统一清理函数
@@ -433,17 +457,6 @@ void cleanupTensorRT(TrnsorRTState& trt)
     delete trt.runtime;
     trt.runtime = nullptr;
 }
-//摄像头发布的前一帧
-cv::Mat latest_frame;
-//通知消费者有新帧，或者程序需推出
-std::condition_variable frame_cv;
-//保护共享图片及状态
-std::mutex frame_mutex;
-//是否存在尚未被取走的新帧
-bool has_new_frame = false;
-//是否请求停止程序
-bool stop = false;
-
 //摄像头县城
 void camera_worker()
 {
@@ -522,6 +535,7 @@ void yolo_worker()
 	if(!initTensorRT(trt))
 	{
 		std::cerr<<"TensorRT初始化失败\n";
+		request_stop();
 		cleanupTensorRT (trt);
 		return;
 	}
@@ -582,6 +596,7 @@ void yolo_worker()
 		}
 	}
 	cv::destroyAllWindows();
+	cleanupTensorRT(trt);
 }
 
 int main()
