@@ -764,14 +764,14 @@ int main()
         // 按照Detection结构体成员的顺序 创建一个对象并追加到vector末尾
         detections.push_back({i, best_class, best_score, x, y, w, h});
         
-        // filtered 保存通过阈值筛选的候选预测
-        const float conf_threshold = 0.25f;
-        for(std::size_t i = 0; i < detections.size(); i++)
+    }
+    // filtered 保存通过阈值筛选的候选预测
+    const float conf_threshold = 0.25f;
+    for(std::size_t i = 0; i < detections.size(); i++)
+    {
+        if(detections[i].score >= conf_threshold)
         {
-            if(detections[i].score >= conf_threshold)
-            {
-                filtered.push_back(detections[i]);
-            }
+            filtered.push_back(detections[i]);
         }
     }
     std::cout << "保存的原始候选预测数量："
@@ -842,7 +842,7 @@ int main()
         // 如果没抑制保留
         nms_detections.push_back(filtered[i]);
         // 可以与后面更低的候选框进行比较
-        for(std::size_t j = 0; j < filtered.size(); j++)
+        for(std::size_t j = i + 1; j < filtered.size(); j++)
         {
             if(suppressed[j])
             {
