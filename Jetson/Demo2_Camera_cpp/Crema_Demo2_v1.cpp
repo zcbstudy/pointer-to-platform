@@ -647,8 +647,7 @@ void yolo_worker()
     const int candidates = trt.output_shape.d[2];
     const int classes = trt.output_shape.d[1] - 4;
 
-    std::vector<Detection> detections;
-    std::vector<Detection> filtered;
+
 
     // 检查CPU缓冲区与Engine输入数据大小是否匹配
     if (input_bytes != trt.input_bytes)
@@ -787,7 +786,8 @@ void yolo_worker()
         // 8400表示候选位置数量
         // 84表示每个候选位置的属性数量：4个坐标 + 80个类别分数
 
-
+        std::vector<Detection> detections;
+        std::vector<Detection> filtered;
         for (int i = 0; i < candidates; i++)
         {
             // 每次进入新的候选位置，都要重新初始化
