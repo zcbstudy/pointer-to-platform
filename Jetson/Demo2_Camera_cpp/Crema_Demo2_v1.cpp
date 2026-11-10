@@ -445,6 +445,76 @@ bool initTensorRT(TrnsorRTState& trt)
 
     std::cout << "GPU输入缓冲区需要："
               << trt.input_bytes << " 字节\n";
+    //申请GPU输入缓冲区
+    //&device_input：指针变量的地址，供 cudaMalloc() 写回结果。
+    //input_bytes：要申请的空间大小，单位是字节
+    cudaError_t err = cudaMalloc(&trt.device_input,trt.input_bytes);
+    if(err != cudaSuccess)
+    {
+        std::cerr << "cudaMalloc失败\n"
+                  << cudaGetErrorString(err) << '\n';
+        return false;
+    }
+
+    if (trt.output_name == nullptr || trt.output_count == 0 ||
+        trt.output_count > std::numeric_limits<std::size_t>::max() / sizeof(float))
+    {
+        std::cerr << "未找到有效的输出张量或输出字节数溢出\n";
+        return false;
+    }
+    trt.output_bytes = trt.output_count * sizeof(float);
+    err = cudaMalloc(&trt.device_output, trt.output_bytes);
+    if(err != cudaSuccess)
+    {
+        std::cerr << "cudaMalloc失败\n"
+                  << cudaGetErrorString(err) << '\n';
+        return false;
+    }
+
+    // 绑定输入张量与GPU输入缓冲区
+    if (!trt.context->setTensorAddress(trt.input_name,trt.device_input))
+    {
+        std::cerr << "输入张量地址绑定失败\n";
+        return false;
+    }
+    // 绑定输出张量与GPU输出缓冲区
+    if (!trt.context->setTensorAddress(trt.output_name,trt.device_output))
+    {
+        std::cerr << "输出张量地址绑定失败\n";
+        return false;
+    }
+    std::cout << "TensorRT输入输出张量绑定成功\n";
+
+    // 第十五部分：创建CUDA Stream
+    err = cudaStreamCreate(&trt.stream);
+    if(err != cudaSuccess)
+    {
+        std::cerr << "cudaStreamCreate失败\n"
+                  << cudaGetErrorString(err) << '\n';
+        return false;
+    }
+    std::cerr<<"CUDA Stream创建成功\n";
+
+    // 第21部分 初步验证yolo的检测结果
+    /*// 找出yolo分数最高的候选框
+    // 当前不绘制检测框 只找出模型最有把握的一个预测
+    // 当前不是通用版 直接按照我的输出来  当前engine输出形状为（1,84,8400）
+    // 8400个候选位置 每个位置对应80个类别分数
+    const int candidates = 8400;
+    const int classes = 80;
+    */
+    //当前改为任意图片 但是解码还是这个3类别模型 比如(1,7,8400)
+    //当前仅支持[1,4+类别数，候选数]的原始检测输出
+    // 不是3维张量||不是单张图片||没有足够的属性通道容纳至少一个类别分数||候选位置数量无效
+    if (trt.output_shape.nbDims !=3 ||
+        trt.output_shape.d[0] != 1 ||
+        trt.output_shape.d[1] <= 4 ||
+        trt.output_shape.d[2] <= 0)
+        {
+            std::cerr << "输出张量形状不合法\n";
+            request_stop();
+            return false;
+        }
     return true;
 }
 
@@ -570,6 +640,16 @@ void yolo_worker()
     std::vector<float> chw(pixels * 3);
     // 输入张量的字节大小
     std::size_t input_bytes = chw.size() * sizeof(float);
+    // 这句话不是申请output_count个字节 而是申请output_count个float元素
+    // 假设output_count=3 那么std::vector<float> output(3) 
+    std::vector<float> output(trt.output_count);
+    //d[1] 84 每个候选位置的属性数量 d[2] 8400 候选位置数量
+    const int candidates = trt.output_shape.d[2];
+    const int classes = trt.output_shape.d[1] - 4;
+
+    std::vector<Detection> detections;
+    std::vector<Detection> filtered;
+
     // 检查CPU缓冲区与Engine输入数据大小是否匹配
     if (input_bytes != trt.input_bytes)
     {
@@ -640,7 +720,266 @@ void yolo_worker()
             j++;
         }
 
-		cv::imshow("Carema-press q to quit",work);
+        cudaError_t err = cudaMemcpy(
+            trt.device_input,// 刚刚申请的CUDA设备内存
+            chw.data(),// 保存RGB/CHW图片张量的CPU内存首地址
+            input_bytes,// 刚才计算的总字节数
+            cudaMemcpyHostToDevice// 复制方向
+        );
+        if(err != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy失败\n"
+                  << cudaGetErrorString(err) << '\n';
+            request_stop();
+            break;
+        }
+
+        // 第十六部分：enqueueV3()执行推理
+        // 就是让TensorRT使用已绑定的输入输出内存 向指定的CUDA Stream提交模型推理任务
+        // 但是enqueueV3（）是异步接口 返回成功不代表GPU已经算万 
+        // 后面必须处理CUDA同比和错误路径 才能安全读取结果 释放内存
+        if(!trt.context->enqueueV3(trt.stream))
+        {
+            std::cerr << "enqueueV3失败\n";
+            request_stop();
+            break;
+        }
+
+        // 第十七部分：等待GPU推理完成
+        //cudaStreamSynchronize（stream）是等待该CUDAStream已提交的工作执行完成
+        if(cudaStreamSynchronize(trt.stream) != cudaSuccess)
+        {
+            std::cerr << "cudaStreamSynchronize失败\n";
+            request_stop();
+            break;
+        }
+        
+        // 第十八部分： GPU->CPU 读取yolo推理结果
+        // 这句话不是申请output_count个字节 而是申请output_count个float元素
+        // 假设output_count=3 那么std::vector<float> output(3) 
+        // 就是 3*sizeof(float)=3*4=12字节
+        // oupput.data()是cpu接收缓冲端的首地址 device_output是GPU输出缓冲区的首地址 ouyput_bytes是需要复制的总字节数
+        // output.data[]是什么 他是返回vector内部连续存储区域的首地址 返回float类型
+        // device_output：GPU 内存中已经保存了 TensorRT 的输出张量。
+        // output.data()：告诉 CUDA，CPU 内存的接收位置在哪里。
+        // cudaMemcpy()：真正执行数据复制。
+        // 复制成功后，就可以通过 output[0]、output[1] 等读取这些浮点数
+        if(cudaMemcpy(output.data(), trt.device_output, trt.output_bytes, cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy失败\n";
+            request_stop();
+            break;
+        }  
+        // 第十九部分：查看YOLO原始推理结果
+        // output.size() 返回CPU数组中float元素的数量
+        // output[i] 读取第i个float元素
+
+        std::cout << "输出元素总数：" << output.size() << '\n';
+
+        for (std::size_t i = 0; i < output.size() && i < 10; i++)
+        {
+            std::cout << "output[" << i << "] = " << output[i] << '\n';
+        }
+
+        // 第21部分：YOLO原始输出解析
+        // 每个候选位置独立查找最高类别分数
+        // (1,84,8400)可以理解为84行、8400列的数据表
+        // 8400表示候选位置数量
+        // 84表示每个候选位置的属性数量：4个坐标 + 80个类别分数
+
+
+        for (int i = 0; i < candidates; i++)
+        {
+            // 每次进入新的候选位置，都要重新初始化
+            float best_score = -1.0f;
+            int best_class = -1;
+
+            for (int c = 0; c < classes; c++)
+            {
+                float score = output[(4 + c) * candidates + i];
+
+                if (score > best_score)
+                {
+                    best_score = score;
+                    best_class = c;
+                }
+            }
+
+            float x = output[0 * candidates + i];
+            float y = output[1 * candidates + i];
+            float w = output[2 * candidates + i];
+            float h = output[3 * candidates + i];
+
+            // 按照Detection结构体成员的顺序创建对象
+            // 并追加到vector末尾
+            detections.push_back({
+                i, best_class, best_score, x, y, w, h
+            });
+        }
+
+        // 第23部分：置信度阈值筛选
+        // filtered保存通过阈值筛选的候选预测
+        const float conf_threshold = 0.25f;
+
+        for (std::size_t i = 0; i < detections.size(); i++)
+        {
+            if (detections[i].score >= conf_threshold)
+            {
+                filtered.push_back(detections[i]);
+            }
+        }
+
+        // 第24部分：验证候选框坐标
+        // 这段代码暂时不执行，保留用于学习和调试
+        /*
+        for (std::size_t i = 0; i < filtered.size(); i++)
+        {
+            // filtered[i]表示filtered数组中的第i个Detection对象
+            // const Detection& d是filtered[i]的只读引用
+            // 不会复制结构体，也不能通过d修改原对象
+           const Detection& d = filtered[i];
+
+           float x1 = d.x - d.w / 2.0f;
+           float y1 = d.y - d.h / 2.0f;
+           float x2 = d.x + d.w / 2.0f;
+           float y2 = d.y + d.h / 2.0f;
+
+            // 计算左上角和右下角坐标
+            // 后续用于NMS或绘制检测框
+
+            // 为什么需要IoU？
+            // 一个物体周围可能出现大量重叠预测框
+            // 需要根据重叠程度进行筛选
+
+            // IoU = 两个框的交集面积 / 并集面积
+            // 并集面积 = 两个框面积之和 - 交集面积
+        }
+        */
+
+        // 第26部分：NMS前按照类别分数降序排序
+        // std::sort是C++标准库提供的排序算法
+        // begin()和end()指定排序范围
+        // []是Lambda表达式，可理解为没有单独命名的小函数
+        // a和b通过const引用传入，避免复制Detection结构体
+
+        std::sort(
+            filtered.begin(),
+            filtered.end(),
+            [](const Detection& a, const Detection& b)
+            {
+                return a.score > b.score;
+            }
+        );
+
+       // 验证排序：打印排序后的最高分
+        if (!filtered.empty())
+        {
+            std::cout << "排序后的最高分："
+                      << filtered[0].score << '\n';
+        }
+
+        // 第27部分：NMS非极大值抑制
+        // 当前filtered已经按照score从高到低排列
+        // iou_threshold是重叠程度阈值
+        // 与前面的conf_threshold不是一个概念
+        const float iou_threshold = 0.45f;
+
+        // 记录每个候选框是否被抑制
+        // 初始false表示尚未被抑制
+        std::vector<bool> suppressed(filtered.size(), false);
+
+        // 保存NMS后的检测结果
+        std::vector<Detection> nms_detections;
+
+        for (std::size_t i = 0; i < filtered.size(); i++)
+        {
+            // 已经被抑制的框直接跳过
+            if (suppressed[i])
+            {
+            continue;
+            }
+
+            // 当前框没有被抑制，保留
+            nms_detections.push_back(filtered[i]);
+
+            // 只与后面分数更低的候选框比较
+            for (std::size_t j = i + 1; j < filtered.size(); j++)
+            {
+                if (suppressed[j])
+                {
+                    continue;
+                }
+
+                // 不同类别之间不互相抑制
+               if (filtered[i].class_id != filtered[j].class_id)
+                {
+                   continue;
+                }
+
+                // 计算两个检测框的IoU
+                float iou = calculateIoU(
+                    filtered[i],
+                    filtered[j]
+                );
+
+                // 重叠程度超过阈值，抑制低分框
+                if (iou > iou_threshold)
+                {
+                    suppressed[j] = true;
+                }
+            }
+        }
+
+        // 第28部分：检查NMS最终检测结果
+        for (const Detection& d : nms_detections)
+        {
+            std::cout << "类别ID：" << d.class_id << '\n';
+            std::cout << "置信度：" << d.score << '\n';
+            std::cout << "中心坐标：" << d.x << ", " << d.y << '\n';
+            std::cout << "宽高：" << d.w << ", " << d.h << '\n';
+        }
+
+        // 第29部分：NMS检测结果可视化
+        // 复制缩放后的图像，避免修改原始resized
+        cv::Mat draw_img = resized.clone();
+
+        // 遍历NMS后的检测结果
+        for (const Detection& d : nms_detections)
+        {
+            // XYWH转换为左上角和右下角坐标
+            float x1 = d.x - d.w / 2.0f;
+            float y1 = d.y - d.h / 2.0f;
+            float x2 = d.x + d.w / 2.0f;
+            float y2 = d.y + d.h / 2.0f;
+
+            // 绘制矩形框
+            cv::rectangle(
+                draw_img,
+                cv::Point(x1, y1),
+                cv::Point(x2, y2),
+                cv::Scalar(0, 255, 0),
+                2
+            );
+
+            // std::to_string把数字转换成字符串
+            // 类别编号 + 置信度
+            std::string label =
+                std::to_string(d.class_id) + " " +
+                std::to_string(d.score);
+
+            // 在检测框附近显示类别和置信度
+            cv::putText(
+                draw_img,
+                label,
+                cv::Point(x1, y1 - 10),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.5,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+        }
+
+		cv::imshow("Carema-press q to quit",draw_img);
 
 		//检测案件
 		int key = cv::waitKey(1);
