@@ -32,7 +32,10 @@ int uart_configure(int fd)
 	//配置8N1,启用接受见笔记
 	tty.c_cflag &= ~(CSIZE | PARENB | CSTOPB);
 	tty.c_cflag |= (CS8 | CREAD | CLOCAL);
-	
+	// 关闭硬件流控
+    #ifdef CRTSCTS
+    tty.c_cflag &= ~CRTSCTS;
+    #endif
 	//关不不要的
 	tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK |
 			ISTRIP | INLCR | IGNCR |
