@@ -75,7 +75,7 @@ UartResult uart_init(UartContext *ctx, const char *device)
     
     if(fd == -1)
     {
-								perror("fd打开失败");
+		perror("fd打开失败");
         return UART_ERR_OPEN;
     }
     
@@ -87,22 +87,22 @@ UartResult uart_init(UartContext *ctx, const char *device)
         return UART_ERR_CONFIG;
     }
 				
-				// 初始化mutex
-				if(pthread_mutex_init(&ctx->rx_mutex, NULL) != 0)
-				{
-								close(fd);
-								return UART_ERR_MUTEX;
-				}
+	// 初始化mutex
+	if(pthread_mutex_init(&ctx->rx_mutex, NULL) != 0)
+	{
+		close(fd);
+		return UART_ERR_MUTEX;
+	}
 				
-				// 初始化cond
-				if(pthread_cond_init(&ctx->rx_cond, NULL) != 0)
-				{
-								pthread_mutex_destory(&ctx->rx_mutex);
-								close(fd);
-								return UART_ERR_COND;
-				}
+	// 初始化cond
+	if(pthread_cond_init(&ctx->rx_cond, NULL) != 0)
+	{
+        pthread_mutex_destory(&ctx->rx_mutex);
+		close(fd);
+		return UART_ERR_COND;
+	}
 				
-				ctx->fd = fd;
-				return UART_OK;
+	ctx->fd = fd;
+	return UART_OK;
 				
 }
