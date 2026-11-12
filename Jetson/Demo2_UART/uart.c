@@ -71,19 +71,38 @@ UartResult uart_init(UartContext *ctx, const char *device)
     ctx->fd = -1;
     
     // 打开串口
-    int fd = open("/dev/ttyTHS1",O_RDWR|O_NOCTTY);
+    int fd = open(device,O_RDWR|O_NOCTTY);
     
     if(fd == -1)
     {
-		perror("fd打开失败");
+								perror("fd打开失败");
         return UART_ERR_OPEN;
     }
     
     // 配置串口
-    int uart_configure = uart_configure();
-    if(uart_configure == -1)
+    int configure = uart_configure(fd);
+    if(configure == -1)
     {
-		perror("函数调用失败");
         close(fd);
         return UART_ERR_CONFIG;
     }
+				
+				// 初始化mutex
+				if(pthread_mutex_init(&ctx->rx_mutex, NULL) != 0)
+				{
+								close(fd);
+								return UART_ERR_MUTEX;
+				}
+				
+				// 初始化cond
+				if(pthread_cond_init(&ctx->rx_cond, NULL) != 0)
+				{
+								pthread_mutex_destory(&ctx->rx_mutex);
+								close(fd);
+								return UART_ERR_COND;
+				}
+				
+				ctx->fd = fd;
+				return UART_OK;
+				
+}
