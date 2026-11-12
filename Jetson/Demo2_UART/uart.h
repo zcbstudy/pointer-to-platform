@@ -37,7 +37,8 @@ typedef enum
     UART_ERR_CONFIG = -2,
     UART_ERR_MUTEX = -3,
     UART_ERR_COND = -4,
-    UART_ERR_PARAM = -5
+    UART_ERR_PARAM = -5,
+    UART_ERR_CLOSE = -6
 } UartResult;
 
 // UART 配置
@@ -53,6 +54,6 @@ void *uart_rx_thread(void *arg);
 void *uart_tx_thread(void *arg);
 
 // UART 资源清理
-void uart_destroy(UartContext *ctx);
+UartResult uart_destroy(UartContext *ctx);
 
 #endif

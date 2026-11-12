@@ -83,26 +83,83 @@ UartResult uart_init(UartContext *ctx, const char *device)
     int configure = uart_configure(fd);
     if(configure == -1)
     {
-        close(fd);
+        if(close(fd) == -1)
+        {
+            perror("close");
+            return UART_ERR_CLOSE;
+        }
         return UART_ERR_CONFIG;
     }
 				
 	// 初始化mutex
 	if(pthread_mutex_init(&ctx->rx_mutex, NULL) != 0)
 	{
-		close(fd);
+		  if(close(fd) == -1)
+        {
+            perror("close");
+            return UART_ERR_CLOSE;
+        }
 		return UART_ERR_MUTEX;
 	}
 				
 	// 初始化cond
 	if(pthread_cond_init(&ctx->rx_cond, NULL) != 0)
 	{
-        pthread_mutex_destory(&ctx->rx_mutex);
-		close(fd);
+        pthread_mutex_destroy(&ctx->rx_mutex);
+		  if(close(fd) == -1)
+        {
+            perror("close");
+            return UART_ERR_CLOSE;
+        }
 		return UART_ERR_COND;
 	}
 				
 	ctx->fd = fd;
 	return UART_OK;
 				
+}
+
+UartResult uart_destroy(UartContext *ctx)
+{
+    //检查参数
+    if(ctx == NULL)
+    {
+    	return UART_ERR_PARAM;
+    }
+
+    // 销毁条件变量
+    if(pthread_cond_destroy(&ctx->rx_cond) != 0)
+    {
+        return UART_ERR_COND;
+    }
+
+    // 销毁互斥锁
+    if(pthread_mutex_destroy(&ctx->rx_mutex) != 0)
+    {
+        return UART_ERR_MUTEX;
+    }
+    // fd置为-1 并且关闭串口
+        if (ctx->fd != -1)
+    {
+        int ret = close(ctx->fd);
+
+        ctx->fd = -1;
+
+        if (ret == -1)
+        {
+            perror("close");
+            return UART_ERR_CLOSE;
+        }
+    }
+
+    return UART_OK;   
+}
+void *uart_rx_thread(void *arg)
+{
+    UartContext *ctx = (UartContext*)arg;
+    unsigned char buf[RX_SIZE];
+
+    ssize_t n = read(ctx->fd, buf, sizeof(buf));
+    
+    return NULL;
 }
