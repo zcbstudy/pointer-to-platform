@@ -10,6 +10,7 @@
 #include <pthread.h>
 
 #define RX_SIZE 256
+#define TX_SIZE 256
 
 //typedef 是为了这个结构体定义一个别名 新名字在末尾存在
 typedef struct 

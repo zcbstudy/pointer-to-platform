@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <poll.h>
 
 int uart_configure(int fd)
 {
@@ -159,7 +160,157 @@ void *uart_rx_thread(void *arg)
     UartContext *ctx = (UartContext*)arg;
     unsigned char buf[RX_SIZE];
 
-    ssize_t n = read(ctx->fd, buf, sizeof(buf));
-    
+    //加一个pollfd结构体
+    //为什么	tty.c_cc[VMIN] = 1;
+	//         tty.c_cc[VTIME] = 0;
+    //我们原来川口的配置是这个 但是这意味着没有数据情况下 read()会一直阻塞
+    // 即使主程序将ctx->stop设置成为1 接受程序也不一定能够即使推出
+    struct pollfd pfd;
+    // fd 希望监听哪一个文件描述符
+    pfd.fd = ctx->fd;
+    // events 希望监听到什么事件
+    // POLLIN表示有数据可读
+    pfd.events = POLLIN;
+    // revents表示实际发生了什么事件
+    pfd.revents = 0;
+    while(1)
+    {
+        pthread_mutex_lock(&ctx->rx_mutex);
+        int stop = ctx->stop;
+        pthread_mutex_unlock(&ctx->rx_mutex);
+        // 检查stop是否停止
+        if(stop == 1)
+        {
+            break;
+        }
+        int ret = poll(&pfd,1,100);
+        if(ret == 0)
+        {
+            // 超时
+            continue;
+        }
+        if(ret == -1)
+        {
+            if(errno == EINTR)
+            {
+                continue;
+            }
+            perror("poll");
+            break;
+        }
+        //POLLIN可读 0x01 
+        //POLLOUT可写 0x04
+        //POLLERR错误 0x08
+        //POLLHUP挂断 0x10
+        //POLLNVAL文件描述符不是一个打开的文件 0x20
+        //假设串口有数据 同时发生了错误
+        //那么pfd.rvents = POLLIN|POLLERR;
+        //对应二进制 0000 1001 但是偶们想知道有没有POLLIN事件 就用按位与
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+        {
+            fprintf(stderr, "UART poll error: 0x%x\n",(unsigned int)pfd.revents);
+
+             break;
+        }
+        if(pfd.revents & POLLIN)
+        {
+            ssize_t n = read(ctx->fd, buf, sizeof(buf));
+            if(n > 0)
+            {
+                 // 枷锁
+                pthread_mutex_lock(&ctx->rx_mutex);
+                if((size_t)n <= RX_SIZE - ctx->rx_len)
+                {
+                    // copy数据
+                    memcpy(&ctx->rx_buf[ctx->rx_len],buf,(size_t)n);
+                    // 更新长度
+                    ctx->rx_len += (size_t)n;
+                }else
+                {
+                    pthread_mutex_unlock(&ctx->rx_mutex);
+                    fprintf(stderr,"RX buffer overflow\n");
+                    break;
+                }
+                 // 唤醒条件变量
+                pthread_cond_signal(&ctx->rx_cond);
+                // 解锁
+                pthread_mutex_unlock(&ctx->rx_mutex);
+            }else if(n == 0)
+            {
+                // 读到0 表示对端关闭
+                break;   
+            }else if(n == -1)
+            {
+                //EINTR 表示 Interrupted system call（系统调用被中断）。
+                if(errno == EINTR)
+                {
+                    continue;
+                }
+                perror("read");
+                break;
+            } 
+        }
+    }
+    pthread_mutex_lock(&ctx->rx_mutex);
+    ctx->stop = 1;
+    pthread_cond_broadcast(&ctx->rx_cond);
+    pthread_mutex_unlock(&ctx->rx_mutex);
     return NULL;
+}
+
+void *uart_tx_thread(void *arg)
+{
+    UartContext *ctx = (UartContext *)arg;
+    unsigned char tx_buf[TX_SIZE];
+    struct pollfd pfd;
+    // 键盘标准输入也是一个文件描述符
+    // STDIN_FILENO
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+
+    while(1)
+    {
+        pthread_mutex_lock(&ctx->rx_mutex);
+        int stop = ctx->stop;
+        pthread_mutex_unlock(&ctx->rx_mutex);
+        // 检查stop是否停止
+        if(stop == 1)
+        {
+            break;
+        }
+        int ret = poll(&pfd,1,100);
+        if(ret == 0)
+        {
+            // 超时
+            continue;
+        }
+        if(ret == -1)
+        {
+            if(errno == EINTR)
+            {
+                continue;
+            }
+            perror("poll");
+            break;
+        }
+        //POLLIN可读 0x01 
+        //POLLOUT可写 0x04
+        //POLLERR错误 0x08
+        //POLLHUP挂断 0x10
+        //POLLNVAL文件描述符不是一个打开的文件 0x20
+        //假设串口有数据 同时发生了错误
+        //那么pfd.rvents = POLLIN|POLLERR;
+        //对应二进制 0000 1001 但是偶们想知道有没有POLLIN事件 就用按位与
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+        {
+            fprintf(stderr, "UART poll error: 0x%x\n",(unsigned int)pfd.revents);
+
+             break;
+        }
+        if(pfd.revents &POLLOUT)
+        {
+            
+        }
+    }
 }
