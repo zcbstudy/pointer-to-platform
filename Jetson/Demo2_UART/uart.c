@@ -337,11 +337,10 @@ void *uart_tx_thread(void *arg)
             ssize_t n = read(STDIN_FILENO,buf,sizeof(buf));
             int count = 0;
             if(n > 0)
-            {
-                ssize_t w = write(ctx->fd,buf,(size_t)n);
-                if(w > 0)
+            { 
+                pthread_mutex_lock(&ctx->tx_mutex);
+                if((size_t)n <= TX_SIZE - ctx->tx_len)
                 {
-                    pthread_mutex_lock(&ctx->tx_mutex);
                     memcpy(&ctx->tx_buf[ctx->tx_len],buf,(size_t)n);
                     ctx->tx_len += (size_t)n;
                 }else{
@@ -349,11 +348,31 @@ void *uart_tx_thread(void *arg)
                     fprintf(stderr,"TX buffer overflow\n");
                     break;
                 }
+                ssize_t w = write(&ctx->fd,ctx->tx_buf[ctx->tx_len],(size_t)n);
+                if(w == -1)
+                {
+                    perror("write");
+                    break;
+                }
+                ctx->tx_len -= (size_t)w;
                 // 唤醒条件变量
                 pthread_cond_signal(&ctx->tx_cond);
                 // 解锁
                 pthread_mutex_unlock(&ctx->tx_mutex);
-            }
+            }else if(n == 0)
+            {
+                // 读到0 表示对端关闭
+                break;   
+            }else if(n == -1)
+            {
+                //EINTR 表示 Interrupted system call（系统调用被中断）。
+                if(errno == EINTR)
+                {
+                    continue;
+                }
+                perror("write");
+                break;
+            } 
         }
     }
 }
