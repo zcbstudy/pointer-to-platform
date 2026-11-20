@@ -48,7 +48,7 @@ int uart_configure(int fd)
 	//设置read等配置
 	tty.c_cc[VMIN] = 1;
 	tty.c_cc[VTIME] = 0;
-	//应用
+	//应用         
 	if(tcsetattr(fd, TCSANOW,&tty) == -1)
 	{
 		perror("tcsetattr");

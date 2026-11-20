@@ -102,12 +102,23 @@ UartResult uart_init(UartContext *ctx, const char *device)
         }
 		return UART_ERR_MUTEX;
 	}
+
+    if(pthread_mutex_init(&ctx->tx_mutex,NULL) != 0)
+    {
+        if(close(fd) == -1)
+        {
+            perror("close");
+            return UART_ERR_CLOSE;
+        }
+        return UART_ERR_MUTEX;
+    }
 				
 	// 初始化cond
 	if(pthread_cond_init(&ctx->rx_cond, NULL) != 0)
 	{
         pthread_mutex_destroy(&ctx->rx_mutex);
-		  if(close(fd) == -1)
+        pthread_mutex_destroy(&ctx->tx_mutex);
+		if(close(fd) == -1)
         {
             perror("close");
             return UART_ERR_CLOSE;
@@ -115,6 +126,18 @@ UartResult uart_init(UartContext *ctx, const char *device)
 		return UART_ERR_COND;
 	}
 				
+    if(pthread_cond_init(&ctx->tx_cond, NULL) != 0)
+    {
+        pthread_mutex_destroy(&ctx->rx_cond);
+        pthread_mutex_destroy(&ctx->tx_mutex);
+        pthread_mutex_destory(&ctx->rx_mutex);
+        if(close(fd) == 1)
+        {
+            perror("close");
+            return UART_ERR_CLOSE;
+        }
+        return UART_ERR_CLOSE;
+    }
 	ctx->fd = fd;
 	return UART_OK;
 				
@@ -261,7 +284,7 @@ void *uart_rx_thread(void *arg)
 void *uart_tx_thread(void *arg)
 {
     UartContext *ctx = (UartContext *)arg;
-    unsigned char tx_buf[TX_SIZE];
+    unsigned char buf[TX_SIZE];
     struct pollfd pfd;
     // 键盘标准输入也是一个文件描述符
     // STDIN_FILENO
@@ -308,9 +331,29 @@ void *uart_tx_thread(void *arg)
 
              break;
         }
-        if(pfd.revents &POLLOUT)
+        if(pfd.revents &POLLIN)
         {
-            
+            // 把键盘的数据当作文件读进
+            ssize_t n = read(STDIN_FILENO,buf,sizeof(buf));
+            int count = 0;
+            if(n > 0)
+            {
+                ssize_t w = write(ctx->fd,buf,(size_t)n);
+                if(w > 0)
+                {
+                    pthread_mutex_lock(&ctx->tx_mutex);
+                    memcpy(&ctx->tx_buf[ctx->tx_len],buf,(size_t)n);
+                    ctx->tx_len += (size_t)n;
+                }else{
+                    pthread_mutex_unlock(&ctx->tx_mutex);
+                    fprintf(stderr,"TX buffer overflow\n");
+                    break;
+                }
+                // 唤醒条件变量
+                pthread_cond_signal(&ctx->tx_cond);
+                // 解锁
+                pthread_mutex_unlock(&ctx->tx_mutex);
+            }
         }
     }
 }
