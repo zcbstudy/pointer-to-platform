@@ -8,6 +8,7 @@
 #define UART_H
 #include <stddef.h>
 #include <pthread.h>
+#include <stdatomic.h>>
 
 #define RX_SIZE 256
 #define TX_SIZE 256
@@ -31,7 +32,7 @@ typedef struct
     pthread_cond_t rx_cond;
     pthread_cond_t tx_cond;
     // 推出请求标志
-    int stop;
+    atomic_int stop;
 
 }UartContext;
 
@@ -54,6 +55,9 @@ UartResult uart_init(UartContext *ctx, const char *device);
 
 // UART 接收线程
 void *uart_rx_thread(void *arg);
+
+// UART 键盘读取线程
+void *uart_keybread_thread(void *arg);
 
 // UART 发送线程
 void *uart_tx_thread(void *arg);

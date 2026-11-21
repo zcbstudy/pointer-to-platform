@@ -69,6 +69,7 @@ UartResult uart_init(UartContext *ctx, const char *device)
     
     // 初始化结构体
     *ctx = (UartContext){0};
+    atomic_init(&ctx->stop,0);
     ctx->fd = -1;
     
     // 打开串口
@@ -198,9 +199,8 @@ void *uart_rx_thread(void *arg)
     pfd.revents = 0;
     while(1)
     {
-        pthread_mutex_lock(&ctx->rx_mutex);
-        int stop = ctx->stop;
-        pthread_mutex_unlock(&ctx->rx_mutex);
+        int stop = atomic_load(&ctx->stop);
+       
         // 检查stop是否停止
         if(stop == 1)
         {
@@ -275,13 +275,16 @@ void *uart_rx_thread(void *arg)
         }
     }
     pthread_mutex_lock(&ctx->rx_mutex);
-    ctx->stop = 1;
+    atomic_store(&ctx->stop,1);
     pthread_cond_broadcast(&ctx->rx_cond);
     pthread_mutex_unlock(&ctx->rx_mutex);
+    pthread_mutex_lock(&ctx->tx_mutex);
+    pthread_cond_broadcast(&ctx->tx_cond);
+    pthread_mutex_unlock(&ctx->tx_mutex);
     return NULL;
 }
 
-void *uart_tx_thread(void *arg)
+void *uart_keybread_thread(void *arg)
 {
     UartContext *ctx = (UartContext *)arg;
     unsigned char buf[TX_SIZE];
@@ -348,17 +351,6 @@ void *uart_tx_thread(void *arg)
                     fprintf(stderr,"TX buffer overflow\n");
                     break;
                 }
-                ssize_t w = write(&ctx->fd,ctx->tx_buf[ctx->tx_len],(size_t)n);
-                if(w == -1)
-                {
-                    perror("write");
-                    break;
-                }
-                ctx->tx_len -= (size_t)w;
-                // 唤醒条件变量
-                pthread_cond_signal(&ctx->tx_cond);
-                // 解锁
-                pthread_mutex_unlock(&ctx->tx_mutex);
             }else if(n == 0)
             {
                 // 读到0 表示对端关闭
@@ -370,9 +362,38 @@ void *uart_tx_thread(void *arg)
                 {
                     continue;
                 }
-                perror("write");
+                perror("read for keyboard");
                 break;
             } 
+        }
+    }
+    return NULL;
+}
+
+/*
+ssize_t w = write(&ctx->fd,ctx->tx_buf[ctx->tx_len],(size_t)n);
+                if(w == -1)
+                {
+                    perror("write");
+                    break;
+                }
+                ctx->tx_len -= (size_t)w;
+                // 唤醒条件变量
+                pthread_cond_signal(&ctx->tx_cond);
+                // 解锁
+                pthread_mutex_unlock(&ctx->tx_mutex);
+*/
+
+void *uart_tx_thread(void *arg)
+{
+    UartContext *ctx = (UartContext *)arg;
+    unsigned char buf[TX_SIZE];
+    while(1)
+    {
+        pthread_mutex_lock(&ctx->tx_mutex);
+        while(ctx->tx_len == 0 && !ctx->stop)
+        {
+            pthread_cond_wait(&ctx->tx_cond,&ctx->tx_mutex);
         }
     }
 }
