@@ -306,7 +306,7 @@ void LedScan(void)
     ADDR0=i&1;
     ADDR1=(i>>1)&1;
     ADDR2=(i>>2)&1;
-    P0=LedBuff[i];
+    P0=LedBuff[5-i]; /* 位序反转：个位显示在最右边 */
     i++;
     if(i==6) i=0;
 }
