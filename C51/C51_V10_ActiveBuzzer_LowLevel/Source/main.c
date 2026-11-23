@@ -21,7 +21,7 @@ sbit KEY_OUT_3=P2^1;
 sbit KEY_OUT_4=P2^0;
 sbit MODE_KEY=P3^2;
 sbit SET_KEY=P3^3;
-sbit BUZZ=P3^0; /* PNP high-side drive; low on, high off: active buzzer */
+sbit BUZZ=P1^6; /* PNP high-side drive; low on, high off: active buzzer */
 
 unsigned char code LedChar[10]={
   0xC0,0xF9,0xA4,0xB0,0x99,0x92,0x82,0xF8,0x80,0x90
